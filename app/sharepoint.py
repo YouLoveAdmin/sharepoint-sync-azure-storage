@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from urllib.parse import ParseResult, quote, urlparse
+from urllib.parse import ParseResult, quote, unquote, urlparse
 
 import httpx
 from azure.core.credentials import TokenCredential
@@ -51,10 +51,27 @@ class SharePointClient:
         return self._collect(f"{GRAPH_ROOT}/sites/{quote(site_id, safe=',')}/drives")
 
     def find_drive(self, site_id: str, library_name: str) -> dict:
-        for drive in self.get_drives(site_id):
-            if drive.get("name", "").casefold() == library_name.casefold():
-                return drive
-        raise LookupError(f"SharePoint library '{library_name}' was not found on a configured site.")
+        drives = self.get_drives(site_id)
+        name = library_name.strip().casefold()
+        matches = [drive for drive in drives if drive.get("name", "").casefold() == name]
+        if not matches:
+            folder_name = unquote(library_name.strip()).casefold()
+            matches = [
+                drive for drive in drives
+                if unquote(urlparse(drive.get("webUrl", "")).path.rstrip("/").rsplit("/", 1)[-1]).casefold()
+                == folder_name
+            ]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise LookupError(
+                f"SharePoint library '{library_name}' is ambiguous; use its unique display name."
+            )
+        raise LookupError(
+            f"SharePoint library '{library_name}' was not found on a configured site. "
+            "Check SHAREPOINT_LIBRARY_NAMES against library display names or URL folder names; "
+            "each configured library must exist on every main source site."
+        )
 
     def delta_items(self, drive_id: str, cursor: str | None) -> tuple[list[dict], str]:
         address = cursor or f"{GRAPH_ROOT}/drives/{quote(drive_id, safe='')}/root/delta"

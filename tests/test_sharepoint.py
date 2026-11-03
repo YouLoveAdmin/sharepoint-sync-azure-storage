@@ -43,3 +43,57 @@ def test_only_page_404_is_treated_as_missing(status: int) -> None:
                 client.get_file_item("drive", "Home.aspx")
     finally:
         client.close()
+
+
+@pytest.mark.parametrize("library_name", ["Shared Documents", "shared documents", "Shared%20Documents"])
+def test_library_lookup_accepts_url_folder_name(library_name: str) -> None:
+    drive = {
+        "id": "documents",
+        "name": "Documents",
+        "webUrl": "https://contoso.sharepoint.com/sites/hr/Shared%20Documents",
+    }
+    client = SharePointClient(
+        FakeCredential(),
+        http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"value": [drive]})
+        )),
+    )
+    try:
+        assert client.find_drive("site", library_name) == drive
+    finally:
+        client.close()
+
+
+def test_display_name_takes_precedence_over_url_folder_alias() -> None:
+    drives = [
+        {"id": "alias", "name": "Other", "webUrl": "https://contoso.sharepoint.com/Documents"},
+        {"id": "exact", "name": "Documents", "webUrl": "https://contoso.sharepoint.com/Shared%20Documents"},
+    ]
+    client = SharePointClient(
+        FakeCredential(), http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"value": drives})
+        )),
+    )
+    try:
+        assert client.find_drive("site", "Documents")["id"] == "exact"
+        with pytest.raises(LookupError, match="was not found"):
+            client.find_drive("site", "Nonexistent")
+    finally:
+        client.close()
+
+
+def test_ambiguous_folder_alias_fails_instead_of_selecting_wrong_library() -> None:
+    drives = [
+        {"id": "first", "name": "First", "webUrl": "https://contoso.sharepoint.com/one/Documents"},
+        {"id": "second", "name": "Second", "webUrl": "https://contoso.sharepoint.com/two/Documents"},
+    ]
+    client = SharePointClient(
+        FakeCredential(), http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"value": drives})
+        )),
+    )
+    try:
+        with pytest.raises(LookupError, match="ambiguous"):
+            client.find_drive("site", "Documents")
+    finally:
+        client.close()

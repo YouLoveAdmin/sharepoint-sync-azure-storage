@@ -27,6 +27,8 @@ All URL lists accept semicolon-separated entries (commas are also supported):
 
 The main site list and library list can be empty when only the new scopes are used. At least one source list must be populated. Use full page URLs, not site URLs, in `SHAREPOINT_SITE_PAGES`, for example `https://contoso.sharepoint.com/sites/hr/SitePages/Home.aspx`. The two additional scopes are additive: if a site also appears in the main site list, its configured libraries still sync normally.
 
+`SHAREPOINT_LIBRARY_NAMES` accepts library display names (for example `Documents`) or library URL folder names (for example `Shared Documents` or `Shared%20Documents`). Matching is case-insensitive, with display names taking precedence. A missing or ambiguous library fails the run rather than silently skipping content. Every listed library must exist on every site in `SHAREPOINT_SITE_URLS`; use the navigation-only and selected-page scopes for sites that do not require a full library export.
+
 Selected pages are checked individually for metadata/ETag changes without enumerating their library items or advancing its delta cursor. A confirmed page `404` removes its tracked Markdown; permission and network failures fail the run without deleting that output.
 
 The consolidated navigation file is atomically replaced after every configured navigation source has been read successfully, so removed menu links disappear and a failed read preserves the previous file. Old per-site `navigation-*.md` exports for those sites are removed after successful consolidation. When no navigation sources are selected, navigation output is left untouched.
@@ -108,32 +110,173 @@ New-MgSitePermission -SiteId $siteId -Roles Read -GrantedToIdentities @{
 
 An administrator must perform the permission and site-grant steps; the Container App does not grant itself access.
 
+### Permission setup helper
+
+The local [assign_permission.ps1](script/assign_permission.ps1) reads deployment and source settings from the repository configuration at runtime, discovers the deployed app's system-assigned identity, and processes all sites in `SHAREPOINT_SITE_URLS`, `SHAREPOINT_SITE_URLS_NAVIGATION`, and the hosting sites derived from `SHAREPOINT_SITE_PAGES`. Site URLs are deduplicated.
+
+Install the Graph authentication module once if it is missing, then sign into Azure CLI with the intended subscription:
+
+```powershell
+Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
+az login
+az account set --subscription '<subscription-id-or-name>'
+
+# Local preview only; no sign-in or permission changes.
+.\script\assign_permission.ps1
+.\script\assign_permission.ps1 -Apply -WhatIf
+
+# Prompts for confirmation and administrator Graph sign-in.
+.\script\assign_permission.ps1 -Apply
+```
+
+The administrator Graph session requests `Application.Read.All`, `AppRoleAssignment.ReadWrite.All`, and `Sites.FullControl.All`. Use an account authorized for app-role assignments and SharePoint site permission management (activate applicable PIM roles first); delegated site operations also require appropriate target-site membership. Tenant consent policy may require a separate administrator. These setup scopes are **not assigned to the runtime identity**. The helper grants only `Sites.Selected` for Graph/SharePoint and site-level `read`. It skips existing grants, warns about broader permissions without removing them, disconnects its process-scoped Graph session, and never prints URLs or identity/configuration values. Partial success is possible; rerun after resolving a failure. Allow permission propagation before testing a sync.
+
+The helper and shared [Configuration.ps1](script/Configuration.ps1) remain local-only under the Git-ignored `script` folder. No configuration file is uploaded or executed as PowerShell.
+
+The permission helper uses core `az resource show` to discover the app identity and does not require the `containerapp` CLI extension. This does not change the separate deployment helper, which still uses Container Apps commands.
+
+If permission setup fails during Azure discovery, its error identifies `account show` or `resource show` and provides a sanitized diagnosis. Azure CLI login is local to each computer/user; signing into Graph or deploying from another machine does not sign in Azure CLI on the machine running this helper. Run `az login`, select the intended subscription with `az account set --subscription '<subscription-id-or-name>'`, and check the deployment settings on that computer. Azure RBAC read access to the app is required in addition to Graph administrator privileges.
+
 ## Azure deployment
 
 `infra/main.bicep` provisions a system-assigned identity, internal-only Container Apps ingress, one Container App replica, a Container Apps managed environment, and an Azure Files share mounted at `OUTPUT_DIR`. The managed identity does not receive SharePoint permissions automatically; follow the administrator steps above after deployment.
 
-Every push to `master` and every manual run of the **Publish container image** GitHub Actions workflow builds and publishes the image to GitHub Container Registry (GHCR). The rolling `latest` tag is updated on each successful run; an immutable `sha-<commit>` tag is published alongside it.
+### Publish the image
 
-The image name is `ghcr.io/youloveadmin/sharepoint-sync-azure-storage:latest`. Container Apps can pull this public image directly after the GHCR package visibility is set to **Public** once. If keeping the package private, configure registry authentication for Container Apps instead.
+Every push to `master` and every manual run of the **Publish container image** GitHub Actions workflow builds and publishes the Docker image to GitHub Container Registry (GHCR). A successful run updates the rolling `latest` tag and publishes an immutable `sha-<commit>` tag.
 
-Deploy the Bicep template using that image. Supply the target resource group, region, site URLs, and converter URL when those values are known:
+Image: `ghcr.io/youloveadmin/sharepoint-sync-azure-storage`
+
+**Before deploying:** the GitHub repository is public, but GHCR package visibility is configured separately. Make the GHCR package **Public** in its package settings. Verify it can be pulled without registry credentials:
+
+```powershell
+docker pull ghcr.io/youloveadmin/sharepoint-sync-azure-storage:latest
+```
+
+If `docker pull` returns `unauthorized`, the package is still private. The Bicep template below does not configure private-registry credentials, so make the package public before using it.
+
+### Deploy to Azure Container Apps
+
+#### PowerShell deployment helper
+
+The local helper [Deploy-SharePointSync.ps1](script/Deploy-SharePointSync.ps1) reads `..\.env` relative to its own location **only when you execute it**. Populate the variable names in [.env.sample](.env.sample), including `AZURE_RESOURCE_GROUP`, `AZURE_LOCATION`, `AZURE_CONTAINER_APP_NAME`, and `AZURE_CONTAINER_APPS_ENVIRONMENT`. Optionally set `AZURE_SUBSCRIPTION_ID`; otherwise it uses the current Azure CLI subscription. `AZURE_TENANT_ID` is optional: when blank, the helper uses that subscription's tenant; when supplied, it refuses deployment if the Azure CLI tenant does not match.
+
+Before deploying, sign in with `az login` and select the intended subscription with `az account set`. Set `OUTPUT_DIR` to an absolute Linux mount path such as `/mnt/sharepoint`, not the sample's local-development `./output`. Set `MARKITDOWN_API_URL` to a converter reachable from Azure, not localhost. Leave `AZURE_CLIENT_ID` empty: the template provisions a system-assigned identity.
+
+Run from the repository root with PowerShell 7:
+
+```powershell
+# Validate settings and preview the operation without reading Azure or deploying.
+.\script\Deploy-SharePointSync.ps1 -Mode Deploy -WhatIf
+
+# Create/update the resource group, managed environment, persistent share, and app.
+.\script\Deploy-SharePointSync.ps1 -Mode Deploy
+
+# Require the app to exist, then reapply configuration and refresh its image.
+.\script\Deploy-SharePointSync.ps1 -Mode Update
+
+# Optionally override AZURE_CONTAINER_IMAGE for a specific published commit.
+.\script\Deploy-SharePointSync.ps1 -Mode Update `
+  -Image 'ghcr.io/youloveadmin/sharepoint-sync-azure-storage:sha-<full-commit-sha>'
+```
+
+`AZURE_CONTAINER_IMAGE` defaults to the published `:latest` image. Both modes apply the same Bicep template, including runtime settings, and force a uniquely named revision so a mutable image tag is pulled again. `Update` is intended for apps created by this template, not arbitrary pre-existing apps; it does not import an existing file share. Keep resource group, environment, and destination settings stable to retain the same output/state mount. Do not update while a sync is running, and avoid overlapping writer processes during revision transitions.
+
+The helper does not print configuration values or raw Azure CLI errors. It uses a temporary parameter file containing only mapped deployment settings and removes it when finished; it never uploads the configuration file itself. Azure resource configuration/deployment history still contains the mapped non-secret settings, so do not put credentials in these values. The image must be publicly pullable: this template does not configure private-registry credentials. SharePoint permission grants remain a separate administrator step.
+
+The helper prints timestamped Azure CLI step start/completion messages, then polls the deployment and container readiness every 15 seconds. Initial template compilation/submission can take several minutes. Polling has a 30-minute overall timeout, configurable with `-DeploymentTimeoutSeconds` and `-PollIntervalSeconds`. A timeout stops local polling, not the Azure deployment; check the resource group's **Deployments** blade before retrying. These limits apply after submission and do not interrupt a blocked Azure CLI call. If the PowerShell prompt has returned without a success message, do not assume deployment succeeded.
+
+If revisions remain **Activating**, inspect replica restart counts and console logs. `CrashLoopBackOff` indicates a startup crash rather than a slow deployment. A startup `ValueError` naming a source setting must be corrected before redeploying. URL lists must contain full `https://` URLs separated by semicolons, without individually quoted entries, PowerShell arrays, or inline comments. Use `/SitePages/*.aspx` URLs for selected pages. The helper validates this syntax locally, including during `-WhatIf`, and reports only the setting name and entry number. Single revision mode can temporarily show both an older revision and its activating replacement; do not switch to multiple revision mode to fix a startup crash.
+
+The entire `script` folder remains Git-ignored as previously requested, so this helper is local-only and will not appear in the GitHub repository unless you explicitly change that policy.
+
+#### Manual Azure CLI alternative
+
+Prerequisites: Azure CLI logged into the target subscription, permission to create the resource group and Azure resources, the public image above, and a MarkItDown endpoint reachable from the Container Apps environment. The template creates an Azure Files share and mounts it at `OUTPUT_DIR`; `.sync-state.json` and converted Markdown persist there across container replacements.
+
+Set deployment values in PowerShell, then create the resource group:
+
+```powershell
+az login
+az account set --subscription '<subscription-id-or-name>'
+
+$resourceGroup = '<resource-group>'
+$location = '<azure-region>'
+$appName = 'ca-sharepoint-sync'
+$image = 'ghcr.io/youloveadmin/sharepoint-sync-azure-storage:latest'
+$converterUrl = 'https://<reachable-converter-host>'
+
+az group create `
+  --name $resourceGroup `
+  --location $location
+```
+
+Deploy the Bicep template. Supply semicolon-separated URLs where a scope has multiple entries. Set unused scopes to an empty string. `sharePointSiteUrls` is for library sync; navigation-only and individually selected page URLs use their separate parameters.
 
 ```powershell
 az deployment group create `
-  --resource-group <resource-group> `
+  --name ca-sharepoint-sync `
+  --resource-group $resourceGroup `
   --template-file infra/main.bicep `
   --parameters `
-    location=<azure-region> `
-    image=ghcr.io/youloveadmin/sharepoint-sync-azure-storage:latest `
-    sharePointSiteUrls='https://tenant.sharepoint.com/sites/example' `
+    location=$location `
+    appName=$appName `
+    image=$image `
+    sharePointSiteUrls='https://tenant.sharepoint.com/sites/hr' `
     sharePointSiteUrlsNavigation='https://tenant.sharepoint.com/sites/menu' `
-    sharePointSitePages='https://tenant.sharepoint.com/SitePages/Home.aspx' `
-    markItDownApiUrl='https://<reachable-converter-host>'
+    sharePointSitePages='https://tenant.sharepoint.com/sites/hr/SitePages/Home.aspx' `
+    sharePointLibraryNames='Shared Documents;Site Pages' `
+    markItDownApiUrl=$converterUrl `
+    outputPath='/mnt/sharepoint'
 ```
 
-For a private GHCR package, configure Container Apps image-pull authentication before expecting the revision to become healthy. Do not pass passwords or access tokens as ordinary Bicep parameters.
+To sync only navigation or selected pages, leave `sharePointSiteUrls` empty. To sync only libraries and their navigation, leave `sharePointSiteUrlsNavigation` and `sharePointSitePages` empty. You can also customize `outputShareName`, `shareQuotaGiB`, `includeNavigation`, and `navigationLocations`; by default the template creates a 100-GiB Azure Files share and mounts it at `/mnt/sharepoint`.
 
-`sharePointSiteUrlsNavigation` and `sharePointSitePages` default to empty strings. For a navigation-only or selected-pages-only deployment, leave `sharePointSiteUrls` empty. Grant the managed identity read access to the sites in all three scopes, including sites hosting individually selected pages.
+Read the deployment outputs and give the system-assigned identity read access to the configured SharePoint sites. An administrator must grant the required Microsoft Graph and SharePoint `Sites.Selected` application permissions and site-level Read grants as described above; deployment alone does not grant SharePoint access.
+
+```powershell
+$deployment = az deployment group show `
+  --name ca-sharepoint-sync `
+  --resource-group $resourceGroup `
+  --query properties.outputs `
+  --output json | ConvertFrom-Json
+
+$appId = $deployment.appId.value
+$principalId = $deployment.managedIdentityPrincipalId.value
+$internalFqdn = $deployment.internalFqdn.value
+$storageAccount = $deployment.outputStorageAccountName.value
+
+az containerapp show `
+  --name $appName `
+  --resource-group $resourceGroup `
+  --query properties.provisioningState `
+  --output tsv
+```
+
+`internalFqdn` is only reachable from the Container Apps environment/network; ingress is intentionally not public. After site permissions are granted, call `POST https://<internalFqdn>/sync` from a client that can reach the internal environment, then poll the returned `status_url`.
+
+### Deploy a newly published image
+
+`latest` is a mutable registry tag; publishing a new image does **not** by itself restart an existing Container App. For each successful workflow run, deploy its immutable commit tag to create a new Container Apps revision:
+
+```powershell
+gh run list `
+  --repo YouLoveAdmin/sharepoint-sync-azure-storage `
+  --workflow publish-container.yml `
+  --branch master `
+  --limit 1 `
+  --json headSha,status,conclusion
+
+$commit = '<headSha from the successful workflow run>'
+$image = "ghcr.io/youloveadmin/sharepoint-sync-azure-storage:sha-$commit"
+
+az containerapp update `
+  --name $appName `
+  --resource-group $resourceGroup `
+  --image $image
+```
+
+Use the immutable tag rather than relying on a running app to detect changes to `latest`. After checking the new revision, you can use `:latest` for a fresh deployment or update by explicitly supplying the newly published image reference.
 
 The sync endpoint is private to the Container Apps environment. Callers must have network access to that environment; the API does not perform end-user authentication. Keep the app at one replica because the current asynchronous run queue and lock are process-local. Run records and delta state survive restarts on Azure Files; a run interrupted by a restart is marked failed and can be started again.
 

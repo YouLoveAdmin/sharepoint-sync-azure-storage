@@ -12,6 +12,13 @@ param appName string = 'sharepoint-sync'
 @description('Container image reference accessible to Azure Container Apps.')
 param image string
 
+@description('Optional unique revision suffix to refresh mutable image tags.')
+param revisionSuffix string = ''
+
+@description('Maximum source/conversion size in bytes.')
+@minValue(1)
+param maxUploadBytes int = 104857600
+
 @description('Semicolon-separated HTTPS SharePoint site URLs.')
 param sharePointSiteUrls string = ''
 
@@ -116,6 +123,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
     template: {
+      revisionSuffix: empty(revisionSuffix) ? null : revisionSuffix
       scale: {
         minReplicas: 1
         maxReplicas: 1
@@ -160,6 +168,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'OUTPUT_DIR'
               value: outputPath
+            }
+            {
+              name: 'MAX_UPLOAD_BYTES'
+              value: string(maxUploadBytes)
             }
           ]
           volumeMounts: [
