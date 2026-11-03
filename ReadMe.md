@@ -110,6 +110,10 @@ When MarkItDown runs in Azure Container Apps, set `MARKITDOWN_API_URL` to
 target port `5001` is used between ingress and the converter container, not by HTTPS
 clients, which connect to port `443`. Both apps must have network access to the
 converter's ingress; an internal converter must be reachable within its environment.
+The deployment helper rejects nonstandard ports on Container Apps ingress URLs.
+Use `-ConverterUrl 'https://<converter-ingress-fqdn>'` to override the endpoint for
+one deployment without editing private configuration. Correct `MARKITDOWN_API_URL`
+privately before future deployments without the override.
 
 If a run reports a MarkItDown network error, check DNS and TCP connectivity from
 the sync container before changing SharePoint permissions. A successful `/health`
