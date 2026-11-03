@@ -46,7 +46,7 @@ param existingStorageAccountName string = ''
 @description('Resource group containing the existing account; defaults to the Container App resource group.')
 param existingStorageAccountResourceGroup string = resourceGroup().name
 
-@description('Container volume and managed-environment storage registration name.')
+@description('Container volume name; existing account/share registrations use a stable derived name.')
 param outputVolumeName string = 'sharepoint-output'
 
 @description('Output directory for generated Markdown and sync state, at or below outputMountPath.')
@@ -68,6 +68,9 @@ param shareQuotaGiB int = 100
 
 var useExistingStorage = !empty(existingStorageAccountName)
 var storageAccountName = useExistingStorage ? existingStorageAccountName : 'st${take(uniqueString(resourceGroup().id), 20)}'
+var environmentStorageName = useExistingStorage
+  ? '${take(outputVolumeName, 45)}-${uniqueString(storageAccountName, outputShareName)}'
+  : outputVolumeName
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!useExistingStorage) {
   name: storageAccountName
@@ -115,7 +118,7 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
 
 resource environmentStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
   parent: managedEnvironment
-  name: outputVolumeName
+  name: environmentStorageName
   dependsOn: [
     outputShare
   ]

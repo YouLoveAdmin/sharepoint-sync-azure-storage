@@ -275,12 +275,20 @@ metadata, but no keys or other private configuration values. Deployment failures
 report a sanitized error category (such as not found or insufficient permission);
 raw Azure CLI errors remain withheld.
 
+To explicitly override just the share for one deployment, use
+`.\script\Deploy-SharePointSync.ps1 -Mode Update -FileShare '<existing-share>'`.
+This does not edit your private configuration; correct its setting separately
+before future deployments without the override.
+
 The share root mounts at `AZURE_PERSISTENT_VOLUME_MOUNT_PATH`. `OUTPUT_DIR` is a
 separate, absolute Linux path at or below that mount (case-sensitive); the example
 writes only under `upstream/workspace-in-sync` inside the share. For local
-development use `./output/upstream/workspace-in-sync` instead. The volume name also names the managed environment's storage
-registration. Use a unique name if another app uses that registration for a
-different share: changing a shared registration can affect other apps.
+development use `./output/upstream/workspace-in-sync` instead. The volume name
+identifies the container volume. For existing accounts, the managed environment
+storage registration gets a stable suffix derived from account/share names,
+because Azure does not allow repointing a registration to a different share.
+Previous registrations are retained; changing destinations does not alter mounts
+used by other apps.
 
 Prerequisites: an existing **SMB** share, shared-key access enabled, deployment
 identity permission to read the account/share and list account keys in the
