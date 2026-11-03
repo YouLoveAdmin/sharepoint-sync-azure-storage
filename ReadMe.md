@@ -75,6 +75,20 @@ After restart, completed runs and checkpoints remain available. Interrupted queu
 
 The local API has no application-level login. Bind it to loopback as shown; do not expose it directly to the internet. In Azure, Container Apps ingress is internal-only.
 
+### Converter connectivity in Azure
+
+When MarkItDown runs in Azure Container Apps, set `MARKITDOWN_API_URL` to
+`https://<converter-ingress-fqdn>` without the container's target port. For example,
+target port `5001` is used between ingress and the converter container, not by HTTPS
+clients, which connect to port `443`. Both apps must have network access to the
+converter's ingress; an internal converter must be reachable within its environment.
+
+If a run reports a MarkItDown network error, check DNS and TCP connectivity from
+the sync container before changing SharePoint permissions. A successful `/health`
+response from the sync API does not verify connectivity to the converter. After
+correcting the deployed setting, wait for the replacement revision to become ready
+and start a new sync. Preserve the existing output mount and state.
+
 ## Azure identity and SharePoint permissions
 
 The Container App uses its system-assigned managed identity by default. To use a user-assigned managed identity locally or in Azure, set `AZURE_CLIENT_ID` to its client ID. The runtime first tries managed identity and falls back to Azure CLI for local development.
