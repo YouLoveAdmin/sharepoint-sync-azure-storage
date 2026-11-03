@@ -40,8 +40,11 @@ param markItDownApiUrl string
 @description('Azure Files share name for generated Markdown and plain-text JSON sync state.')
 param outputShareName string = 'sharepoint-output'
 
-@description('Existing SMB storage account in this resource group. Empty creates a dedicated account/share.')
+@description('Existing SMB storage account in the selected subscription. Empty creates a dedicated account/share.')
 param existingStorageAccountName string = ''
+
+@description('Resource group containing the existing account; defaults to the Container App resource group.')
+param existingStorageAccountResourceGroup string = resourceGroup().name
 
 @description('Container volume and managed-environment storage registration name.')
 param outputVolumeName string = 'sharepoint-output'
@@ -83,6 +86,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!us
 
 resource selectedStorageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
   name: storageAccountName
+  scope: resourceGroup(useExistingStorage ? existingStorageAccountResourceGroup : resourceGroup().name)
 }
 
 resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = if (!useExistingStorage) {

@@ -196,7 +196,7 @@ If permission setup fails during Azure discovery, its error identifies `account 
 
 ## Azure deployment
 
-`infra/main.bicep` provisions a system-assigned identity, internal-only Container Apps ingress, one Container App replica, a Container Apps managed environment, and an Azure Files mount. It can reuse an existing SMB account/share in the same subscription and resource group, or create dedicated storage when no existing account is specified. The managed identity does not receive SharePoint permissions automatically; follow the administrator steps above after deployment.
+`infra/main.bicep` provisions a system-assigned identity, internal-only Container Apps ingress, one Container App replica, a Container Apps managed environment, and an Azure Files mount. It can reuse an existing SMB account/share in the same subscription, including another resource group, or create dedicated storage when no existing account is specified. The managed identity does not receive SharePoint permissions automatically; follow the administrator steps above after deployment.
 
 ### Publish the image
 
@@ -245,13 +245,17 @@ Set these deployment values in your private configuration (the agent does not re
 
 ```dotenv
 AZURE_PERSISTENT_STORAGE_ACCOUNT=<existing-storage-account-name>
+AZURE_PERSISTENT_STORAGE_ACCOUNT_RESOURCE_GROUP=<storage-account-resource-group>
 AZURE_PERSISTENT_FILE_SHARE=<existing-smb-share-name>
 AZURE_PERSISTENT_VOLUME_NAME=sharepoint-output
 AZURE_PERSISTENT_VOLUME_MOUNT_PATH=/output
 OUTPUT_DIR=/output/upstream/workspace-in-sync
 ```
 
-The existing account must be in `AZURE_RESOURCE_GROUP` in the selected subscription.
+The existing account must be in the selected subscription. Set
+`AZURE_PERSISTENT_STORAGE_ACCOUNT_RESOURCE_GROUP` to its resource group; blank/unset
+uses `AZURE_RESOURCE_GROUP`. The latter remains the Container App's resource group
+and is never changed by the storage setting.
 Both account and share settings are required together. The helper validates their
 existence through read-only management API calls before deployment; a missing
 resource fails rather than falling back to new storage. Bicep does not create,
@@ -260,14 +264,14 @@ when intentionally creating the original dedicated account and 100-GiB share.
 
 The share root mounts at `AZURE_PERSISTENT_VOLUME_MOUNT_PATH`. `OUTPUT_DIR` is a
 separate, absolute Linux path at or below that mount (case-sensitive); the example
-writes only under `upstream/workspace-in-sync` inside the share. The sample's
-`./output/upstream/workspace-in-sync` remains local-development-only and must be
-changed for Azure. The volume name also names the managed environment's storage
+writes only under `upstream/workspace-in-sync` inside the share. For local
+development use `./output/upstream/workspace-in-sync` instead. The volume name also names the managed environment's storage
 registration. Use a unique name if another app uses that registration for a
 different share: changing a shared registration can affect other apps.
 
 Prerequisites: an existing **SMB** share, shared-key access enabled, deployment
-identity permission to read the account/share and list account keys, and Container
+identity permission to read the account/share and list account keys in the
+storage resource group, and Container
 Apps environment permission to configure storage. Bicep resolves the account key
 inside Azure; the helper does not retrieve it, write it to the parameter file, or
 print it. The environment must reach Azure Files over SMB (TCP 445); storage
@@ -339,6 +343,7 @@ creation mode (`shareQuotaGiB` is ignored in this mode):
 ```powershell
 # Add to the --parameters list of the deployment command above:
 existingStorageAccountName='<existing-account>' `
+existingStorageAccountResourceGroup='<storage-account-resource-group>' `
 outputShareName='<existing-share>' `
 outputVolumeName='sharepoint-output' `
 outputMountPath='/output' `
