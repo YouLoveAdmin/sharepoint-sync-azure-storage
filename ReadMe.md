@@ -262,6 +262,19 @@ resource fails rather than falling back to new storage. Bicep does not create,
 resize, or change the existing account/share. Leave **both** settings empty only
 when intentionally creating the original dedicated account and 100-GiB share.
 
+Use the account's resource group, and use only the share name for
+`AZURE_PERSISTENT_FILE_SHARE` (not a blob container, URL, or subfolder). To list
+the account's existing SMB shares without deploying, run:
+
+```powershell
+.\script\Deploy-SharePointSync.ps1 -ListStorageShares
+```
+
+This diagnostic explicitly prints share names/protocols retrieved from Azure
+metadata, but no keys or other private configuration values. Deployment failures
+report a sanitized error category (such as not found or insufficient permission);
+raw Azure CLI errors remain withheld.
+
 The share root mounts at `AZURE_PERSISTENT_VOLUME_MOUNT_PATH`. `OUTPUT_DIR` is a
 separate, absolute Linux path at or below that mount (case-sensitive); the example
 writes only under `upstream/workspace-in-sync` inside the share. For local
