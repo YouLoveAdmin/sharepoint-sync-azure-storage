@@ -97,3 +97,17 @@ def test_ambiguous_folder_alias_fails_instead_of_selecting_wrong_library() -> No
             client.find_drive("site", "Documents")
     finally:
         client.close()
+
+
+def test_drive_discovery_requests_system_libraries() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert "system" in request.url.params["$select"].split(",")
+        return httpx.Response(200, json={"value": [{"id": "pages", "name": "Site Pages"}]})
+
+    client = SharePointClient(
+        FakeCredential(), http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+    )
+    try:
+        assert client.find_drive("site", "Site Pages")["id"] == "pages"
+    finally:
+        client.close()

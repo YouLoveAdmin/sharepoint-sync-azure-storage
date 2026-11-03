@@ -18,11 +18,17 @@ class MarkItDownClient:
         self.max_upload_bytes = max_upload_bytes
         self.http = http_client or httpx.Client(timeout=300, follow_redirects=False)
         self._base_host = urlparse(self.base_url).netloc.casefold()
+        self._unsupported_extensions: set[str] = set()
 
     def close(self) -> None:
         self.http.close()
 
+    def check_file_type(self, filename: str) -> None:
+        if PurePosixPath(filename).suffix.casefold() in self._unsupported_extensions:
+            raise UnsupportedFileTypeError("MarkItDown does not support this file type.")
+
     def convert(self, filename: str, content: bytes) -> str:
+        self.check_file_type(filename)
         if len(content) > self.max_upload_bytes:
             raise ValueError(f"Source file exceeds MAX_UPLOAD_BYTES ({self.max_upload_bytes}).")
         try:
@@ -38,6 +44,9 @@ class MarkItDownClient:
                 except json.JSONDecodeError:
                     raise RuntimeError("MarkItDown conversion failed (HTTP 400).") from None
                 if isinstance(rejection, dict) and rejection.get("error") == "File type not supported":
+                    extension = PurePosixPath(filename).suffix.casefold()
+                    if extension:
+                        self._unsupported_extensions.add(extension)
                     raise UnsupportedFileTypeError(
                         "MarkItDown does not support this file type."
                     ) from None

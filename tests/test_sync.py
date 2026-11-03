@@ -2,9 +2,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import httpx
 
 from app.config import Settings
-from app.conversion import UnsupportedFileTypeError
+from app.conversion import MarkItDownClient, UnsupportedFileTypeError
 from app.storage import RunStore
 from app.sync import SyncService
 
@@ -64,6 +65,9 @@ class FakeSharePoint:
 class FakeConverter:
     def __init__(self) -> None:
         self.calls = 0
+
+    def check_file_type(self, filename: str) -> None:
+        return None
 
     def convert(self, filename: str, content: bytes) -> str:
         self.calls += 1
@@ -175,6 +179,44 @@ def test_only_explicitly_unsupported_files_are_skipped(
     assert (tmp_path / "previous.md").read_text() == "previous export"
     assert "explicitly rejected as unsupported" in caplog.text
     assert next(tmp_path.rglob("report.pdf.md")).is_file()
+
+
+def test_known_unsupported_extensions_are_skipped_before_downloading(tmp_path: Path) -> None:
+    downloaded: list[str] = []
+
+    class RecordingSharePoint(FakeSharePoint):
+        def download_file(self, drive_id: str, item_id: str) -> bytes:
+            assert item_id != "large-video", "Known unsupported videos must not be downloaded."
+            downloaded.append(item_id)
+            return b"source data"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/download":
+            return httpx.Response(200, content=b"# Report")
+        if b'filename="small.mp4"' in request.content:
+            return httpx.Response(400, json={"error": "File type not supported"})
+        return httpx.Response(200, json={"download_url": "/download"})
+
+    sharepoint = RecordingSharePoint()
+    sharepoint.changes = [
+        {"id": "small-video", "name": "small.mp4", "eTag": "v1", "file": {}},
+        {"id": "large-video", "name": "large.MP4", "eTag": "v2", "file": {}, "size": 500_000_000},
+        {"id": "report", "name": "report.pdf", "eTag": "r1", "file": {}},
+    ]
+    service = make_service(tmp_path, sharepoint, FakeConverter())
+    service.converter = MarkItDownClient(
+        "http://converter:5001",
+        http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+    )
+    try:
+        result = service.execute()
+    finally:
+        service.converter.close()
+
+    assert result["unsupported"] == 2
+    assert result["converted"] == 1
+    assert downloaded == ["small-video", "report"]
+    assert service.store.get_cursor("drive-id") == "delta-link"
 
 
 def test_deleted_folder_removes_descendants_without_matching_wildcards(tmp_path: Path) -> None:

@@ -30,6 +30,10 @@ The main site list and library list can be empty when only the new scopes are us
 
 `SHAREPOINT_LIBRARY_NAMES` accepts library display names (for example `Documents`) or library URL folder names (for example `Shared Documents` or `Shared%20Documents`). Matching is case-insensitive, with display names taking precedence. A missing or ambiguous library fails the run rather than silently skipping content. Every listed library must exist on every site in `SHAREPOINT_SITE_URLS`; use the navigation-only and selected-page scopes for sites that do not require a full library export.
 
+Library discovery explicitly includes Graph system drives so that hidden system
+libraries such as `Site Pages` can be selected. Other system libraries are not
+exported unless configured.
+
 Selected pages are checked individually for metadata/ETag changes without enumerating their library items or advancing its delta cursor. A confirmed page `404` removes its tracked Markdown; permission and network failures fail the run without deleting that output.
 
 The consolidated navigation file is atomically replaced after every configured navigation source has been read successfully, so removed menu links disappear and a failed read preserves the previous file. Old per-site `navigation-*.md` exports for those sites are removed after successful consolidation. When no navigation sources are selected, navigation output is left untouched.
@@ -98,6 +102,12 @@ advance their delta cursor, so unchanged unsupported files are not retried on
 every incremental run; a source change or a full scan will retry them. The
 `unsupported` count describes rejections encountered in that run, not the total
 number of unsupported files in the source.
+
+The converter client remembers explicitly rejected filename extensions for its
+process lifetime. Subsequent files with those extensions are counted and skipped
+before download, avoiding unnecessary transfers (including oversized videos).
+This cache resets on restart; source and conversion size limits still apply to
+files whose types have not been rejected.
 
 ## Azure identity and SharePoint permissions
 

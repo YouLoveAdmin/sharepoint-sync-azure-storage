@@ -49,6 +49,9 @@ def test_converter_identifies_explicit_unsupported_file_response() -> None:
     try:
         with pytest.raises(UnsupportedFileTypeError, match="does not support this file type"):
             client.convert("video.mp4", b"video")
+        with pytest.raises(UnsupportedFileTypeError):
+            client.check_file_type("another.MP4")
+        client.check_file_type("report.pdf")
     finally:
         client.close()
 

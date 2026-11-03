@@ -102,25 +102,25 @@ class SyncService:
             return
 
         filename = str(item.get("name") or PurePosixPath(source_path).name)
-        if filename.casefold().endswith(".aspx"):
-            parsed_site = urlparse(site_url)
-            library_path = "SitePages" if drive["name"].casefold() == "site pages" else drive["name"]
-            server_relative_path = "/".join(
-                part.strip("/") for part in (parsed_site.path, library_path, source_path) if part
-            )
-            html, modified = self.sharepoint.get_page_html(
-                site_url, f"/{server_relative_path}"
-            )
-            source_content = html.encode("utf-8")
-            conversion_name = f"{PurePosixPath(filename).stem}.html"
-            content_type = "page"
-        else:
-            source_content = self.sharepoint.download_file(drive["id"], item_id)
-            modified = str(item.get("lastModifiedDateTime") or "")
-            conversion_name = filename
-            content_type = "document"
-
+        is_page = filename.casefold().endswith(".aspx")
+        conversion_name = f"{PurePosixPath(filename).stem}.html" if is_page else filename
         try:
+            self.converter.check_file_type(conversion_name)
+            if is_page:
+                parsed_site = urlparse(site_url)
+                library_path = "SitePages" if drive["name"].casefold() == "site pages" else drive["name"]
+                server_relative_path = "/".join(
+                    part.strip("/") for part in (parsed_site.path, library_path, source_path) if part
+                )
+                html, modified = self.sharepoint.get_page_html(
+                    site_url, f"/{server_relative_path}"
+                )
+                source_content = html.encode("utf-8")
+                content_type = "page"
+            else:
+                source_content = self.sharepoint.download_file(drive["id"], item_id)
+                modified = str(item.get("lastModifiedDateTime") or "")
+                content_type = "document"
             markdown = self.converter.convert(conversion_name, source_content)
         except UnsupportedFileTypeError:
             logger.warning(

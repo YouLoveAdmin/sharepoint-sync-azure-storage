@@ -48,7 +48,10 @@ class SharePointClient:
         return self._graph_get(address)
 
     def get_drives(self, site_id: str) -> list[dict]:
-        return self._collect(f"{GRAPH_ROOT}/sites/{quote(site_id, safe=',')}/drives")
+        return self._collect(
+            f"{GRAPH_ROOT}/sites/{quote(site_id, safe=',')}/drives"
+            "?$select=id,name,webUrl,system"
+        )
 
     def find_drive(self, site_id: str, library_name: str) -> dict:
         drives = self.get_drives(site_id)
