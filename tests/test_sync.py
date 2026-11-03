@@ -121,6 +121,57 @@ def test_delta_sync_converts_once_and_removes_deleted_output(tmp_path: Path) -> 
     assert not output.exists()
 
 
+def test_allowlist_filters_before_download_and_preserves_deletions(tmp_path: Path) -> None:
+    class GuardedSharePoint(FakeSharePoint):
+        def download_file(self, drive_id: str, item_id: str) -> bytes:
+            assert item_id == "allowed", "Excluded files must never be downloaded."
+            return b"pdf"
+
+    sharepoint = GuardedSharePoint()
+    converter = FakeConverter()
+    service = make_service(tmp_path, sharepoint, converter)
+    service.settings = replace(service.settings, supported_source_file_types=(".pdf",))
+    service.store.write_markdown("old.md", "old")
+    service.store.upsert_item("drive-id", "removed", "old.mp4", "old.md", "old")
+    sharepoint.changes = [
+        {"id": "removed", "deleted": {}},
+        {"id": "folder", "name": "folder.mp4", "folder": {}},
+        {"id": "video", "name": "large.mp4", "size": 500_000_000, "file": {}},
+        {"id": "no-extension", "name": "README", "file": {}},
+        {"id": "allowed", "name": "report.PDF", "file": {}, "eTag": "v1"},
+    ]
+
+    result = service.execute()
+
+    assert result["filtered"] == 2
+    assert result["converted"] == 1
+    assert result["unsupported"] == 0
+    assert result["deleted"] == 1
+    assert converter.calls == 1
+    assert service.store.get_cursor("drive-id") == "delta-link"
+    assert service.store.get_item("drive-id", "folder") is not None
+    assert service.store.get_item("drive-id", "video") is None
+    assert not (tmp_path / "old.md").exists()
+
+
+@pytest.mark.parametrize(("types", "converted", "filtered"), [
+    ((".aspx",), 1, 0), ((".html",), 0, 1),
+])
+def test_allowlist_checks_page_source_extension(
+    tmp_path: Path, types: tuple[str, ...], converted: int, filtered: int,
+) -> None:
+    sharepoint = FakeSharePoint()
+    service = make_service(tmp_path, sharepoint, FakeConverter())
+    service.settings = replace(
+        service.settings, site_urls=(), supported_source_file_types=types,
+        page_urls=("https://contoso.sharepoint.com/sites/hr/SitePages/Home.aspx",),
+    )
+    result = service.execute()
+    assert result["converted"] == converted
+    assert result["filtered"] == filtered
+    assert len(sharepoint.page_paths) == converted
+
+
 def test_site_page_uses_sharepoint_server_relative_path(tmp_path: Path) -> None:
     sharepoint = FakeSharePoint()
     converter = FakeConverter()

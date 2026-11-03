@@ -75,3 +75,28 @@ def test_page_scope_rejects_site_urls(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValueError, match="SHAREPOINT_SITE_PAGES"):
         Settings.from_env()
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    (" .PDF; .DocX,.ASPX;.PDF ", (".pdf", ".docx", ".aspx")),
+    ("", ()),
+])
+def test_source_file_types_are_normalized(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: tuple[str, ...],
+) -> None:
+    monkeypatch.setenv("SHAREPOINT_SITE_URLS", "https://contoso.sharepoint.com")
+    monkeypatch.setenv("SHAREPOINT_LIBRARY_NAMES", "Documents")
+    monkeypatch.setenv("MARKITDOWN_API_URL", "http://converter:5001")
+    monkeypatch.setenv("OUTPUT_DIR", "/mnt/output")
+    monkeypatch.setenv("SUPPORTED_SOURCE_FILE_TYPES", value)
+
+    assert Settings.from_env().supported_source_file_types == expected
+
+
+@pytest.mark.parametrize("value", ["PDF", "*.pdf", ".", ".pdf/path", ".pdf .docx"])
+def test_invalid_source_file_types_fail(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    monkeypatch.setenv("SUPPORTED_SOURCE_FILE_TYPES", value)
+    with pytest.raises(ValueError, match="SUPPORTED_SOURCE_FILE_TYPES"):
+        Settings.from_env()

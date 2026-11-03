@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -48,9 +49,19 @@ class Settings:
     max_upload_bytes: int = 104_857_600
     navigation_site_urls: tuple[str, ...] = ()
     page_urls: tuple[str, ...] = ()
+    supported_source_file_types: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> Settings:
+        source_file_types = tuple(dict.fromkeys(
+            extension.casefold()
+            for extension in _split_values(os.getenv("SUPPORTED_SOURCE_FILE_TYPES", ""))
+        ))
+        if any(not re.fullmatch(r"\.[a-z0-9]+", extension) for extension in source_file_types):
+            raise ValueError(
+                "SUPPORTED_SOURCE_FILE_TYPES must contain dot-prefixed extensions "
+                "separated by semicolons or commas, for example .PDF;.DOCX."
+            )
         sites = _split_values(os.getenv("SHAREPOINT_SITE_URLS", ""))
         navigation_sites = _split_values(os.getenv("SHAREPOINT_SITE_URLS_NAVIGATION", ""))
         pages = _split_values(os.getenv("SHAREPOINT_SITE_PAGES", ""))
@@ -116,4 +127,5 @@ class Settings:
             max_upload_bytes=max_upload_bytes,
             navigation_site_urls=navigation_sites,
             page_urls=pages,
+            supported_source_file_types=source_file_types,
         )

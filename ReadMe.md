@@ -34,6 +34,29 @@ Library discovery explicitly includes Graph system drives so that hidden system
 libraries such as `Site Pages` can be selected. Other system libraries are not
 exported unless configured.
 
+### Source file type allowlist
+
+`SUPPORTED_SOURCE_FILE_TYPES` limits exported files by their original filename
+extension, for example `.PDF;.DOCX;.ASPX`. Semicolons or commas are accepted;
+matching is case-insensitive. Entries must be dot-prefixed extensions, not
+wildcards. Empty/unset preserves the previous behavior (no allowlist filtering).
+The deployment helper passes this setting to the container in both modes; direct
+Bicep deployments use `supportedSourceFileTypes`.
+
+Files outside the list, including extensionless files, are ignored **before any
+content download or conversion** and counted as `filtered` in the run summary.
+This applies to library items and individually selected pages; include `.ASPX`
+for pages even though they are converted as HTML. Navigation exports, folder
+tracking, and deletion cleanup are unaffected. Allowing an extension does not
+guarantee the converter supports it; explicit converter rejections remain counted
+separately as `unsupported`.
+
+Filtering does not delete previously exported Markdown or reset delta cursors.
+Successful scans still advance their cursors. Expanding the allowlist therefore
+exports newly allowed files only when Graph reports a change or a full scan is
+performed; it does not automatically backfill unchanged files. The `filtered`
+count covers items encountered in the current run, not all excluded source files.
+
 Selected pages are checked individually for metadata/ETag changes without enumerating their library items or advancing its delta cursor. A confirmed page `404` removes its tracked Markdown; permission and network failures fail the run without deleting that output.
 
 The consolidated navigation file is atomically replaced after every configured navigation source has been read successfully, so removed menu links disappear and a failed read preserves the previous file. Old per-site `navigation-*.md` exports for those sites are removed after successful consolidation. When no navigation sources are selected, navigation output is left untouched.
@@ -173,7 +196,7 @@ If permission setup fails during Azure discovery, its error identifies `account 
 
 ## Azure deployment
 
-`infra/main.bicep` provisions a system-assigned identity, internal-only Container Apps ingress, one Container App replica, a Container Apps managed environment, and an Azure Files share mounted at `OUTPUT_DIR`. The managed identity does not receive SharePoint permissions automatically; follow the administrator steps above after deployment.
+`infra/main.bicep` provisions a system-assigned identity, internal-only Container Apps ingress, one Container App replica, a Container Apps managed environment, and an Azure Files mount. It can reuse an existing SMB account/share in the same subscription and resource group, or create dedicated storage when no existing account is specified. The managed identity does not receive SharePoint permissions automatically; follow the administrator steps above after deployment.
 
 ### Publish the image
 
@@ -214,7 +237,51 @@ Run from the repository root with PowerShell 7:
   -Image 'ghcr.io/youloveadmin/sharepoint-sync-azure-storage:sha-<full-commit-sha>'
 ```
 
-`AZURE_CONTAINER_IMAGE` defaults to the published `:latest` image. Both modes apply the same Bicep template, including runtime settings, and force a uniquely named revision so a mutable image tag is pulled again. `Update` is intended for apps created by this template, not arbitrary pre-existing apps; it does not import an existing file share. Keep resource group, environment, and destination settings stable to retain the same output/state mount. Do not update while a sync is running, and avoid overlapping writer processes during revision transitions.
+`AZURE_CONTAINER_IMAGE` defaults to the published `:latest` image. Both modes apply the same Bicep template, including runtime settings, and force a uniquely named revision so a mutable image tag is pulled again. `Update` is intended for apps created by this template, not arbitrary pre-existing apps. Both modes can attach the existing file share configured below. Keep resource group, environment, and destination settings stable to retain the same output/state mount. Do not update while a sync is running, and avoid overlapping writer processes during revision transitions.
+
+##### Reuse an existing Azure Files share
+
+Set these deployment values in your private configuration (the agent does not read it):
+
+```dotenv
+AZURE_PERSISTENT_STORAGE_ACCOUNT=<existing-storage-account-name>
+AZURE_PERSISTENT_FILE_SHARE=<existing-smb-share-name>
+AZURE_PERSISTENT_VOLUME_NAME=sharepoint-output
+AZURE_PERSISTENT_VOLUME_MOUNT_PATH=/output
+OUTPUT_DIR=/output/upstream/workspace-in-sync
+```
+
+The existing account must be in `AZURE_RESOURCE_GROUP` in the selected subscription.
+Both account and share settings are required together. The helper validates their
+existence through read-only management API calls before deployment; a missing
+resource fails rather than falling back to new storage. Bicep does not create,
+resize, or change the existing account/share. Leave **both** settings empty only
+when intentionally creating the original dedicated account and 100-GiB share.
+
+The share root mounts at `AZURE_PERSISTENT_VOLUME_MOUNT_PATH`. `OUTPUT_DIR` is a
+separate, absolute Linux path at or below that mount (case-sensitive); the example
+writes only under `upstream/workspace-in-sync` inside the share. The sample's
+`./output/upstream/workspace-in-sync` remains local-development-only and must be
+changed for Azure. The volume name also names the managed environment's storage
+registration. Use a unique name if another app uses that registration for a
+different share: changing a shared registration can affect other apps.
+
+Prerequisites: an existing **SMB** share, shared-key access enabled, deployment
+identity permission to read the account/share and list account keys, and Container
+Apps environment permission to configure storage. Bicep resolves the account key
+inside Azure; the helper does not retrieve it, write it to the parameter file, or
+print it. The environment must reach Azure Files over SMB (TCP 445); storage
+firewalls/private endpoints/DNS must permit this. Preflight does not prove that
+network path or perform a write test; revision readiness and a sync verify it.
+Do not enable broader storage network access automatically to work around a
+mount failure.
+
+Switching shares or output subfolders is **not a data migration**. Stop/wait for
+active syncs before switching. The helper does not copy, move, or delete old
+Markdown/state or remove old Azure storage resources. A new empty destination
+starts a full export. To retain checkpoints/history, copy `.sync-state.json`
+together with its entire corresponding output tree into the new output subfolder
+while no writer is active, then update and verify before retiring old storage.
 
 The helper does not print configuration values or raw Azure CLI errors. It uses a temporary parameter file containing only mapped deployment settings and removes it when finished; it never uploads the configuration file itself. Azure resource configuration/deployment history still contains the mapped non-secret settings, so do not put credentials in these values. The image must be publicly pullable: this template does not configure private-registry credentials. SharePoint permission grants remain a separate administrator step.
 
@@ -226,7 +293,7 @@ The entire `script` folder remains Git-ignored as previously requested, so this 
 
 #### Manual Azure CLI alternative
 
-Prerequisites: Azure CLI logged into the target subscription, permission to create the resource group and Azure resources, the public image above, and a MarkItDown endpoint reachable from the Container Apps environment. The template creates an Azure Files share and mounts it at `OUTPUT_DIR`; `.sync-state.json` and converted Markdown persist there across container replacements.
+Prerequisites: Azure CLI logged into the target subscription, permission to create the resource group and Azure resources, the public image above, and a MarkItDown endpoint reachable from the Container Apps environment. By default the template creates an Azure Files share and mounts it at `OUTPUT_DIR`; `.sync-state.json` and converted Markdown persist there across container replacements. To reuse storage, pass `existingStorageAccountName`, `outputShareName`, `outputVolumeName`, and `outputMountPath` explicitly, with `outputPath` at or below the mount.
 
 Set deployment values in PowerShell, then create the resource group:
 
@@ -265,6 +332,21 @@ az deployment group create `
 ```
 
 To sync only navigation or selected pages, leave `sharePointSiteUrls` empty. To sync only libraries and their navigation, leave `sharePointSiteUrlsNavigation` and `sharePointSitePages` empty. You can also customize `outputShareName`, `shareQuotaGiB`, `includeNavigation`, and `navigationLocations`; by default the template creates a 100-GiB Azure Files share and mounts it at `/mnt/sharepoint`.
+
+For existing storage, add these parameters instead of using the default storage
+creation mode (`shareQuotaGiB` is ignored in this mode):
+
+```powershell
+# Add to the --parameters list of the deployment command above:
+existingStorageAccountName='<existing-account>' `
+outputShareName='<existing-share>' `
+outputVolumeName='sharepoint-output' `
+outputMountPath='/output' `
+outputPath='/output/upstream/workspace-in-sync'
+```
+
+Direct Bicep deployments do not run the helper's path and storage preflight
+checks; supply a valid SMB share and ensure `outputPath` is within the mount.
 
 Read the deployment outputs and give the system-assigned identity read access to the configured SharePoint sites. An administrator must grant the required Microsoft Graph and SharePoint `Sites.Selected` application permissions and site-level Read grants as described above; deployment alone does not grant SharePoint access.
 

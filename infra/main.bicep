@@ -19,6 +19,9 @@ param revisionSuffix string = ''
 @minValue(1)
 param maxUploadBytes int = 104857600
 
+@description('Semicolon-separated dot-prefixed source extensions; empty disables allowlist filtering.')
+param supportedSourceFileTypes string = ''
+
 @description('Semicolon-separated HTTPS SharePoint site URLs.')
 param sharePointSiteUrls string = ''
 
@@ -37,8 +40,17 @@ param markItDownApiUrl string
 @description('Azure Files share name for generated Markdown and plain-text JSON sync state.')
 param outputShareName string = 'sharepoint-output'
 
-@description('Mounted path for generated Markdown and sync state.')
+@description('Existing SMB storage account in this resource group. Empty creates a dedicated account/share.')
+param existingStorageAccountName string = ''
+
+@description('Container volume and managed-environment storage registration name.')
+param outputVolumeName string = 'sharepoint-output'
+
+@description('Output directory for generated Markdown and sync state, at or below outputMountPath.')
 param outputPath string = '/mnt/sharepoint'
+
+@description('Mount point of the file share root; outputPath may be a subdirectory.')
+param outputMountPath string = outputPath
 
 @description('Enable navigation export for main sites; explicit navigation-only sites are always exported.')
 param includeNavigation bool = true
@@ -51,9 +63,10 @@ param navigationLocations string = 'Auto'
 @maxValue(5120)
 param shareQuotaGiB int = 100
 
-var storageAccountName = 'st${take(uniqueString(resourceGroup().id), 20)}'
+var useExistingStorage = !empty(existingStorageAccountName)
+var storageAccountName = useExistingStorage ? existingStorageAccountName : 'st${take(uniqueString(resourceGroup().id), 20)}'
 
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!useExistingStorage) {
   name: storageAccountName
   location: location
   sku: {
@@ -68,12 +81,16 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
-resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = {
+resource selectedStorageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+  name: storageAccountName
+}
+
+resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = if (!useExistingStorage) {
   parent: storageAccount
   name: 'default'
 }
 
-resource outputShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
+resource outputShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = if (!useExistingStorage) {
   parent: fileService
   name: outputShareName
   properties: {
@@ -94,12 +111,15 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
 
 resource environmentStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
   parent: managedEnvironment
-  name: 'sharepoint-output'
+  name: outputVolumeName
+  dependsOn: [
+    outputShare
+  ]
   properties: {
     azureFile: {
-      accountName: storageAccount.name
-      accountKey: storageAccount.listKeys().keys[0].value
-      shareName: outputShare.name
+      accountName: storageAccountName
+      accountKey: selectedStorageAccount.listKeys().keys[0].value
+      shareName: outputShareName
       accessMode: 'ReadWrite'
     }
   }
@@ -173,11 +193,15 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'MAX_UPLOAD_BYTES'
               value: string(maxUploadBytes)
             }
+            {
+              name: 'SUPPORTED_SOURCE_FILE_TYPES'
+              value: supportedSourceFileTypes
+            }
           ]
           volumeMounts: [
             {
-              volumeName: 'sharepoint-output'
-              mountPath: outputPath
+              volumeName: outputVolumeName
+              mountPath: outputMountPath
             }
           ]
           probes: [
@@ -206,7 +230,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       ]
       volumes: [
         {
-          name: 'sharepoint-output'
+          name: outputVolumeName
           storageType: 'AzureFile'
           storageName: environmentStorage.name
         }
@@ -218,4 +242,4 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 output appId string = containerApp.id
 output managedIdentityPrincipalId string = containerApp.identity.principalId
 output internalFqdn string = containerApp.properties.configuration.ingress.fqdn
-output outputStorageAccountName string = storageAccount.name
+output outputStorageAccountName string = storageAccountName

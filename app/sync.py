@@ -35,7 +35,10 @@ class SyncService:
         self._run_lock.release()
 
     def execute(self) -> dict[str, int]:
-        summary = {"converted": 0, "skipped": 0, "deleted": 0, "navigation": 0, "unsupported": 0}
+        summary = {
+            "converted": 0, "skipped": 0, "deleted": 0,
+            "navigation": 0, "unsupported": 0, "filtered": 0,
+        }
         for site_url in self.settings.site_urls:
             site = self.sharepoint.resolve_site(site_url)
             for library_name in self.settings.library_names:
@@ -94,6 +97,13 @@ class SyncService:
         item_id = str(item["id"])
         etag = str(item.get("eTag") or item.get("cTag") or item.get("lastModifiedDateTime") or "")
         source_path = self._source_path(item)
+        filename = str(item.get("name") or PurePosixPath(source_path).name)
+        if (
+            self.settings.supported_source_file_types
+            and PurePosixPath(filename).suffix.casefold() not in self.settings.supported_source_file_types
+        ):
+            summary["filtered"] += 1
+            return
         previous = self.store.get_item(drive["id"], item_id)
         relative_output = self._output_path(site_url, drive["name"], source_path)
         output_file = (self.store.output_dir / relative_output).resolve()
@@ -101,7 +111,6 @@ class SyncService:
             summary["skipped"] += 1
             return
 
-        filename = str(item.get("name") or PurePosixPath(source_path).name)
         is_page = filename.casefold().endswith(".aspx")
         conversion_name = f"{PurePosixPath(filename).stem}.html" if is_page else filename
         try:
