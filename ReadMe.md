@@ -112,7 +112,11 @@ An administrator must perform the permission and site-grant steps; the Container
 
 `infra/main.bicep` provisions a system-assigned identity, internal-only Container Apps ingress, one Container App replica, a Container Apps managed environment, and an Azure Files share mounted at `OUTPUT_DIR`. The managed identity does not receive SharePoint permissions automatically; follow the administrator steps above after deployment.
 
-Build and publish the image to a registry accessible by Container Apps, then deploy the Bicep template. Supply the target resource group, region, image, site URLs, and converter URL when those values are known:
+Every push to `master` and every manual run of the **Publish container image** GitHub Actions workflow builds and publishes the image to GitHub Container Registry (GHCR). The rolling `latest` tag is updated on each successful run; an immutable `sha-<commit>` tag is published alongside it.
+
+The image name is `ghcr.io/youloveadmin/sharepoint-sync-azure-storage:latest`. Container Apps can pull this public image directly after the GHCR package visibility is set to **Public** once. If keeping the package private, configure registry authentication for Container Apps instead.
+
+Deploy the Bicep template using that image. Supply the target resource group, region, site URLs, and converter URL when those values are known:
 
 ```powershell
 az deployment group create `
@@ -120,14 +124,14 @@ az deployment group create `
   --template-file infra/main.bicep `
   --parameters `
     location=<azure-region> `
-    image=<registry>/<image>:<tag> `
+    image=ghcr.io/youloveadmin/sharepoint-sync-azure-storage:latest `
     sharePointSiteUrls='https://tenant.sharepoint.com/sites/example' `
     sharePointSiteUrlsNavigation='https://tenant.sharepoint.com/sites/menu' `
     sharePointSitePages='https://tenant.sharepoint.com/SitePages/Home.aspx' `
     markItDownApiUrl='https://<reachable-converter-host>'
 ```
 
-If the image is in a private registry, configure Container Apps image-pull authentication for that registry before expecting the revision to become healthy. Do not pass passwords or access tokens as ordinary Bicep parameters.
+For a private GHCR package, configure Container Apps image-pull authentication before expecting the revision to become healthy. Do not pass passwords or access tokens as ordinary Bicep parameters.
 
 `sharePointSiteUrlsNavigation` and `sharePointSitePages` default to empty strings. For a navigation-only or selected-pages-only deployment, leave `sharePointSiteUrls` empty. Grant the managed identity read access to the sites in all three scopes, including sites hosting individually selected pages.
 
