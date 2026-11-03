@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from urllib.parse import urljoin, urlparse
 
 from app.config import Settings, page_url_parts
-from app.conversion import MarkItDownClient, add_front_matter
+from app.conversion import MarkItDownClient, UnsupportedFileTypeError, add_front_matter
 from app.sharepoint import SharePointClient
 from app.storage import RunStore
 
@@ -35,7 +35,7 @@ class SyncService:
         self._run_lock.release()
 
     def execute(self) -> dict[str, int]:
-        summary = {"converted": 0, "skipped": 0, "deleted": 0, "navigation": 0}
+        summary = {"converted": 0, "skipped": 0, "deleted": 0, "navigation": 0, "unsupported": 0}
         for site_url in self.settings.site_urls:
             site = self.sharepoint.resolve_site(site_url)
             for library_name in self.settings.library_names:
@@ -120,7 +120,16 @@ class SyncService:
             conversion_name = filename
             content_type = "document"
 
-        markdown = self.converter.convert(conversion_name, source_content)
+        try:
+            markdown = self.converter.convert(conversion_name, source_content)
+        except UnsupportedFileTypeError:
+            logger.warning(
+                "Skipping a file explicitly rejected as unsupported by MarkItDown (extension %s). "
+                "Any previously exported output is unchanged.",
+                PurePosixPath(filename).suffix,
+            )
+            summary["unsupported"] += 1
+            return
         title = self._title(markdown, filename)
         content = add_front_matter(
             markdown,

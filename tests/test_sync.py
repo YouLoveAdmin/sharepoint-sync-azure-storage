@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
+from app.conversion import UnsupportedFileTypeError
 from app.storage import RunStore
 from app.sync import SyncService
 
@@ -136,6 +137,44 @@ def test_site_page_uses_sharepoint_server_relative_path(tmp_path: Path) -> None:
     assert result["converted"] == 1
     assert sharepoint.page_paths == ["/sites/hr/SitePages/home.aspx"]
     assert converter.calls == 1
+
+
+@pytest.mark.parametrize("unsupported", [True, False])
+def test_only_explicitly_unsupported_files_are_skipped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, unsupported: bool,
+) -> None:
+    class RejectingConverter(FakeConverter):
+        def convert(self, filename: str, content: bytes) -> str:
+            if filename.endswith(".mp4"):
+                if unsupported:
+                    raise UnsupportedFileTypeError("MarkItDown does not support this file type.")
+                raise RuntimeError("MarkItDown conversion failed (HTTP 400).")
+            return super().convert(filename, content)
+
+    sharepoint = FakeSharePoint()
+    service = make_service(tmp_path, sharepoint, RejectingConverter())
+    sharepoint.changes = [
+        {"id": "video", "name": "video.mp4", "eTag": "v1", "file": {}},
+        {"id": "report", "name": "report.pdf", "eTag": "r1", "file": {}},
+    ]
+    service.store.write_markdown("previous.md", "previous export")
+    service.store.upsert_item("drive-id", "video", "video.mp4", "previous.md", "old")
+    if not unsupported:
+        with pytest.raises(RuntimeError, match="HTTP 400"):
+            service.execute()
+        assert service.store.get_cursor("drive-id") is None
+        return
+
+    result = service.execute()
+
+    assert result["unsupported"] == 1
+    assert result["converted"] == 1
+    assert result["skipped"] == 0
+    assert service.store.get_cursor("drive-id") == "delta-link"
+    assert service.store.get_item("drive-id", "video")["etag"] == "old"
+    assert (tmp_path / "previous.md").read_text() == "previous export"
+    assert "explicitly rejected as unsupported" in caplog.text
+    assert next(tmp_path.rglob("report.pdf.md")).is_file()
 
 
 def test_deleted_folder_removes_descendants_without_matching_wildcards(tmp_path: Path) -> None:

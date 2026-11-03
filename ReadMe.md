@@ -6,6 +6,7 @@ This project exports configured SharePoint document libraries, modern Site Pages
 
 - Reads configured libraries from configured SharePoint sites with Microsoft Graph drive delta queries.
 - Converts changed files using `POST /convert` with a multipart `file` field. The converter returns JSON containing a `download_url`; the URL must use the same host as the configured converter endpoint.
+- Skips files explicitly rejected by the converter as unsupported, logs a warning, and reports them separately as `unsupported` in the run summary. Other conversion errors fail the run.
 - Extracts the `CanvasContent1` HTML for `.aspx` pages in the configured Site Pages library and sends the HTML to the converter.
 - Reads additional navigation-only sites and individually selected pages without exporting other content from those sites.
 - Exports the site's visible SharePoint navigation location to Markdown (`Auto` detects the modern communication-site top navigation or the team-site Quick Launch).
@@ -88,6 +89,15 @@ the sync container before changing SharePoint permissions. A successful `/health
 response from the sync API does not verify connectivity to the converter. After
 correcting the deployed setting, wait for the replacement revision to become ready
 and start a new sync. Preserve the existing output mount and state.
+
+An HTTP `400` response with JSON `{"error":"File type not supported"}` is an
+explicit unsupported-file rejection, not a successful conversion. These files
+produce no new Markdown and do not prevent supported files from syncing. Any
+previously exported version remains unchanged. Successful library scans still
+advance their delta cursor, so unchanged unsupported files are not retried on
+every incremental run; a source change or a full scan will retry them. The
+`unsupported` count describes rejections encountered in that run, not the total
+number of unsupported files in the source.
 
 ## Azure identity and SharePoint permissions
 

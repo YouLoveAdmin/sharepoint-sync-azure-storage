@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from app.conversion import MarkItDownClient, add_front_matter
+from app.conversion import MarkItDownClient, UnsupportedFileTypeError, add_front_matter
 
 
 def test_converter_uses_multipart_and_downloads_markdown() -> None:
@@ -34,6 +34,37 @@ def test_converter_rejects_download_url_on_another_host() -> None:
     )
     try:
         with pytest.raises(RuntimeError, match="configured endpoint host"):
+            client.convert("report.pdf", b"pdf")
+    finally:
+        client.close()
+
+
+def test_converter_identifies_explicit_unsupported_file_response() -> None:
+    client = MarkItDownClient(
+        "http://converter:5001",
+        http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(400, json={"error": "File type not supported"})
+        )),
+    )
+    try:
+        with pytest.raises(UnsupportedFileTypeError, match="does not support this file type"):
+            client.convert("video.mp4", b"video")
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(400, json={"error": "Invalid file"}),
+    httpx.Response(400, content=b"Bad request"),
+    httpx.Response(500, json={"error": "File type not supported"}),
+])
+def test_other_converter_rejections_remain_failures(response: httpx.Response) -> None:
+    client = MarkItDownClient(
+        "http://converter:5001",
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda request: response)),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="conversion failed"):
             client.convert("report.pdf", b"pdf")
     finally:
         client.close()

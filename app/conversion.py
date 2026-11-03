@@ -7,6 +7,10 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 
+class UnsupportedFileTypeError(RuntimeError):
+    pass
+
+
 class MarkItDownClient:
     def __init__(self, base_url: str, max_upload_bytes: int = 104_857_600,
                  http_client: httpx.Client | None = None) -> None:
@@ -28,6 +32,15 @@ class MarkItDownClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400:
+                try:
+                    rejection = exc.response.json()
+                except json.JSONDecodeError:
+                    raise RuntimeError("MarkItDown conversion failed (HTTP 400).") from None
+                if isinstance(rejection, dict) and rejection.get("error") == "File type not supported":
+                    raise UnsupportedFileTypeError(
+                        "MarkItDown does not support this file type."
+                    ) from None
             raise RuntimeError(f"MarkItDown conversion failed (HTTP {exc.response.status_code}).") from None
         except httpx.RequestError:
             raise RuntimeError("MarkItDown request failed due to a network error.") from None
