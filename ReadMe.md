@@ -136,6 +136,58 @@ before download, avoiding unnecessary transfers (including oversized videos).
 This cache resets on restart; source and conversion size limits still apply to
 files whose types have not been rejected.
 
+## Automatic sync with Linux cron
+
+```dotenv
+AUTO_SYNC=true
+SYNC_INTERVAL=43200
+```
+
+`SYNC_INTERVAL` is a positive integer number of **seconds** (43200 = 12 hours).
+Unset `AUTO_SYNC` defaults to false; unset `SYNC_INTERVAL` defaults to 43200.
+Invalid values fail startup and deployment validation rather than silently
+disabling automation. The deployment helper maps both settings in Deploy and
+Update; direct Bicep deployments use `autoSync` and `syncInterval`.
+
+The Docker image contains an actual Linux cron daemon with a job checking every
+minute. Enabling automatic sync queues a run immediately at API startup, then
+cron invokes the loopback-only `POST /internal/sync-due` endpoint to check whether
+another run is due. There is no cron-expression setting: the API tracks elapsed
+intervals with a monotonic clock. Runs occur on the first cron tick at or after
+the due time (up to one minute late); intervals shorter than a minute still run
+at most once per minute. Restarting resets the schedule and queues an immediate
+run; it does not replay missed ticks.
+
+Automatic and manual runs share the same lock, executor, persistent run history,
+delta checkpoints, and failure handling. A due tick during an active run logs a
+warning and skips that occurrence instead of queueing overlapping work; the next
+check becomes due one interval later. A failed run is recorded as failed and the
+next due run may retry. Cron/API submission failures are logged explicitly.
+`AUTO_SYNC=false` disables both startup runs and due checks, not manual `POST /sync`.
+Find automatic run IDs in container logs or the persistent state, then use the
+existing `GET /sync/{run_id}` endpoint.
+
+The container supervisor and cron daemon run as root because Debian cron requires
+it; the API and all SharePoint/conversion/output work run as `appuser` (UID 10001).
+The cron job only calls the local API and has no copied configuration or secrets
+in its crontab. The supervisor stops the container if either daemon exits and
+forwards termination to both children. The API waits for its worker before closing
+HTTP clients; a platform-forced termination may still interrupt a long sync.
+The image disables forwarded-header trust so ingress callers cannot impersonate
+a loopback scheduler request. Do not override that server option or expose the
+scheduler endpoint through a local forwarding proxy.
+
+Keep one replica and one API worker. The lock is process-local: **automatic sync
+must not run in two revisions sharing an output destination**. Before rolling an
+update, disable automatic scheduling on the old revision, wait for its current
+run to finish, and ensure the old revision is stopped before enabling the new
+one. Single revision mode can still overlap processes during activation.
+The deployment helper does not orchestrate that maintenance procedure.
+
+Local `uvicorn` starts the immediate run when enabled but does not install/start
+Linux cron; use the Docker image for repeated cron-triggered runs, or configure
+your own local cron job to call the loopback scheduler endpoint.
+
 ## Azure identity and SharePoint permissions
 
 The Container App uses its system-assigned managed identity by default. To use a user-assigned managed identity locally or in Azure, set `AZURE_CLIENT_ID` to its client ID. The runtime first tries managed identity and falls back to Azure CLI for local development.

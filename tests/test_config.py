@@ -100,3 +100,42 @@ def test_invalid_source_file_types_fail(
     monkeypatch.setenv("SUPPORTED_SOURCE_FILE_TYPES", value)
     with pytest.raises(ValueError, match="SUPPORTED_SOURCE_FILE_TYPES"):
         Settings.from_env()
+
+
+@pytest.mark.parametrize(("enabled", "interval"), [("true", "43200"), ("false", "60")])
+def test_auto_sync_settings(
+    monkeypatch: pytest.MonkeyPatch, enabled: str, interval: str,
+) -> None:
+    monkeypatch.setenv("SHAREPOINT_SITE_URLS", "https://contoso.sharepoint.com")
+    monkeypatch.setenv("SHAREPOINT_LIBRARY_NAMES", "Documents")
+    monkeypatch.setenv("MARKITDOWN_API_URL", "http://converter:5001")
+    monkeypatch.setenv("OUTPUT_DIR", "/mnt/output")
+    monkeypatch.setenv("AUTO_SYNC", enabled)
+    monkeypatch.setenv("SYNC_INTERVAL", interval)
+    settings = Settings.from_env()
+    assert settings.auto_sync == (enabled == "true")
+    assert settings.sync_interval == int(interval)
+
+
+def test_auto_sync_defaults_to_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTO_SYNC", raising=False)
+    monkeypatch.delenv("SYNC_INTERVAL", raising=False)
+    monkeypatch.setenv("SHAREPOINT_SITE_URLS", "https://contoso.sharepoint.com")
+    monkeypatch.setenv("SHAREPOINT_LIBRARY_NAMES", "Documents")
+    monkeypatch.setenv("MARKITDOWN_API_URL", "http://converter:5001")
+    monkeypatch.setenv("OUTPUT_DIR", "/mnt/output")
+    settings = Settings.from_env()
+    assert not settings.auto_sync
+    assert settings.sync_interval == 43200
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("AUTO_SYNC", "invalid"), ("SYNC_INTERVAL", "0"), ("SYNC_INTERVAL", "-1"),
+    ("SYNC_INTERVAL", "12h"), ("SYNC_INTERVAL", "1.5"), ("SYNC_INTERVAL", "2147483648"),
+])
+def test_invalid_auto_sync_settings_fail(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str,
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=name):
+        Settings.from_env()

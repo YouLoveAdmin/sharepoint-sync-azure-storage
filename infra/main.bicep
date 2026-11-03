@@ -22,6 +22,13 @@ param maxUploadBytes int = 104857600
 @description('Semicolon-separated dot-prefixed source extensions; empty disables allowlist filtering.')
 param supportedSourceFileTypes string = ''
 
+@description('Run sync immediately on application startup and subsequently when the interval is due.')
+param autoSync bool = false
+
+@description('Automatic sync interval in seconds; Linux cron checks once per minute.')
+@minValue(1)
+param syncInterval int = 43200
+
 @description('Semicolon-separated HTTPS SharePoint site URLs.')
 param sharePointSiteUrls string = ''
 
@@ -203,6 +210,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'SUPPORTED_SOURCE_FILE_TYPES'
               value: supportedSourceFileTypes
+            }
+            {
+              name: 'AUTO_SYNC'
+              value: string(autoSync)
+            }
+            {
+              name: 'SYNC_INTERVAL'
+              value: string(syncInterval)
             }
           ]
           volumeMounts: [

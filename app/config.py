@@ -50,9 +50,18 @@ class Settings:
     navigation_site_urls: tuple[str, ...] = ()
     page_urls: tuple[str, ...] = ()
     supported_source_file_types: tuple[str, ...] = ()
+    auto_sync: bool = False
+    sync_interval: int = 43200
 
     @classmethod
     def from_env(cls) -> Settings:
+        auto_sync = _read_bool("AUTO_SYNC", False)
+        try:
+            sync_interval = int(os.getenv("SYNC_INTERVAL", str(cls.sync_interval)))
+        except ValueError:
+            raise ValueError("SYNC_INTERVAL must be a positive integer number of seconds.") from None
+        if not 1 <= sync_interval <= 2_147_483_647:
+            raise ValueError("SYNC_INTERVAL must be between 1 and 2147483647 seconds.")
         source_file_types = tuple(dict.fromkeys(
             extension.casefold()
             for extension in _split_values(os.getenv("SUPPORTED_SOURCE_FILE_TYPES", ""))
@@ -128,4 +137,6 @@ class Settings:
             navigation_site_urls=navigation_sites,
             page_urls=pages,
             supported_source_file_types=source_file_types,
+            auto_sync=auto_sync,
+            sync_interval=sync_interval,
         )
