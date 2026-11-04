@@ -126,6 +126,71 @@ def test_delta_sync_converts_once_and_removes_deleted_output(tmp_path: Path) -> 
     assert not output.exists()
 
 
+def test_full_sync_reenumerates_and_reconverts_unchanged_files(tmp_path: Path) -> None:
+    cursors: list[str | None] = []
+
+    class DeltaSharePoint(FakeSharePoint):
+        def delta_items(self, drive_id: str, cursor: str | None) -> tuple[list[dict], str]:
+            cursors.append(cursor)
+            return (self.changes if cursor is None else []), "next-cursor"
+
+    sharepoint = DeltaSharePoint()
+    sharepoint.changes = [{"id": "file", "name": "report.pdf", "eTag": "v1", "file": {}}]
+    converter = FakeConverter()
+    service = make_service(tmp_path, sharepoint, converter)
+    service.store.create_run("history")
+    service.store.update_run("history", "succeeded", {"converted": 1})
+
+    assert service.execute()["converted"] == 1
+    assert service.execute()["converted"] == 0
+    full = service.execute(full_sync=True)
+    assert full["converted"] == 1
+    assert full["skipped"] == 0
+    assert service.execute()["converted"] == 0
+    assert cursors == [None, "next-cursor", None, "next-cursor"]
+    assert converter.calls == 2
+    assert service.store.get_run("history")["status"] == "succeeded"
+    assert service.store.get_item("drive-id", "file")["etag"] == "v1"
+
+
+def test_full_sync_refreshes_selected_page_without_changing_drive_cursor(tmp_path: Path) -> None:
+    sharepoint = FakeSharePoint()
+    converter = FakeConverter()
+    service = make_service(tmp_path, sharepoint, converter)
+    service.settings = replace(
+        service.settings, site_urls=(),
+        page_urls=("https://contoso.sharepoint.com/sites/hr/SitePages/Home.aspx",),
+    )
+    service.store.set_cursor("drive-id", "existing-cursor")
+    assert service.execute()["converted"] == 1
+    assert service.execute()["skipped"] == 1
+    assert service.execute(full_sync=True)["converted"] == 1
+    assert service.execute()["skipped"] == 1
+    assert converter.calls == 2
+    assert sharepoint.delta_calls == 0
+    assert service.store.get_cursor("drive-id") == "existing-cursor"
+
+
+def test_failed_full_sync_preserves_cursor_and_previous_output(tmp_path: Path) -> None:
+    class FailingConverter(FakeConverter):
+        def convert(self, filename: str, content: bytes) -> str:
+            raise RuntimeError("Conversion failed.")
+
+    sharepoint = FakeSharePoint()
+    sharepoint.changes = [{"id": "file", "name": "report.pdf", "eTag": "v1", "file": {}}]
+    service = make_service(tmp_path, sharepoint, FakeConverter())
+    service.execute()
+    output = next(tmp_path.rglob("report.pdf.md"))
+    previous_content = output.read_text(encoding="utf-8")
+    service.store.set_cursor("drive-id", "old-cursor")
+    service.converter = FailingConverter()
+    with pytest.raises(RuntimeError, match="Conversion failed"):
+        service.execute(full_sync=True)
+    assert output.read_text(encoding="utf-8") == previous_content
+    assert service.store.get_cursor("drive-id") == "old-cursor"
+    assert service.store.get_item("drive-id", "file")["etag"] == "v1"
+
+
 def test_allowlist_filters_before_download_and_preserves_deletions(tmp_path: Path) -> None:
     class GuardedSharePoint(FakeSharePoint):
         def download_file(self, drive_id: str, item_id: str) -> bytes:

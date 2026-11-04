@@ -12,7 +12,7 @@ This project exports configured SharePoint document libraries, modern Site Pages
 - Exports the site's visible SharePoint navigation location to Markdown (`Auto` detects the modern communication-site top navigation or the team-site Quick Launch).
 - Skips unchanged files, atomically replaces changed outputs, and removes outputs when Graph reports a source deletion.
 - Persists delta cursors, item mappings, and run status in the plain-text `.sync-state.json` under `OUTPUT_DIR`.
-- Exposes an asynchronous internal HTTP API: `POST /sync` starts a run; `GET /sync/{run_id}` reports its status; `GET /health` is a health probe.
+- Exposes an asynchronous internal HTTP API: `POST /sync` starts an incremental run; `POST /sync?full_sync=true` forces a full refresh; `GET /sync/{run_id}` reports its status; `GET /health` is a health probe.
 
 Each library item or selected page is published under a site/library-relative folder as `<original-name>.md` (for example `report.pdf.md` or `Home.aspx.md`). All navigation is consolidated in `OUTPUT_DIR/Extended_Knowledge.md`, grouped by source site and navigation location with nested menu links. Item Markdown includes YAML front matter with the source URL, file path, ETag, and modified time.
 
@@ -80,8 +80,33 @@ silently omitting the part, preserving any previously published Markdown.
 No additional API permissions are needed beyond the existing page REST access.
 
 Existing delta cursors and ETag skipping are unchanged. After upgrading, old page
-exports are refreshed when their source changes or a full scan is performed;
-deploying this change alone does not backfill unchanged pages.
+exports are refreshed when their source changes or a full refresh is requested
+with `POST /sync?full_sync=true`; deploying this change alone does not backfill
+unchanged pages.
+
+### Forcing a full refresh
+
+Send `POST /sync?full_sync=true` to re-enumerate every configured library without
+its saved delta cursor and reconvert eligible files and selected pages even when
+their ETags are unchanged. This is useful after exporter changes or expanding
+the source-extension allowlist. It can download and convert many files; allowlist
+filtering and unsupported-file handling still apply. Navigation is refreshed as
+usual. Normal `POST /sync`, startup syncs, and scheduled syncs remain incremental;
+the flag applies only to the requested run.
+
+The endpoint returns the same `202` run identifier/status URL and rejects
+overlapping runs with `409`. Poll `GET /sync/{run_id}` until completion.
+Successful library scans save new delta cursors for subsequent incremental runs;
+a failed library scan keeps its previous cursor. Already completed item updates
+are not rolled back if a later item fails.
+
+Do not delete `.sync-state.json` to force a refresh. It also contains run history
+and item/output mappings used for deletion cleanup. Deleting it while the app is
+running can break state operations; deleting it while stopped loses that history
+and cannot reconcile old orphaned outputs. A full refresh preserves these
+records, handles reported deletions and selected-page `404`s as usual, and does
+not purge exports merely because they are absent from a fresh scan or no longer
+in the configured scopes.
 
 The consolidated navigation file is atomically replaced after every configured navigation source has been read successfully, so removed menu links disappear and a failed read preserves the previous file. Old per-site `navigation-*.md` exports for those sites are removed after successful consolidation. When no navigation sources are selected, navigation output is left untouched.
 

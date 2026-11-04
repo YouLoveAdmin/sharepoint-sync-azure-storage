@@ -24,6 +24,7 @@ class FakeService:
         self.started = threading.Event()
         self.finish = threading.Event()
         self.settings = SimpleNamespace(auto_sync=False, sync_interval=43200)
+        self.full_sync_calls: list[bool] = []
 
     def acquire_run(self) -> bool:
         return self._lock.acquire(blocking=False)
@@ -31,7 +32,8 @@ class FakeService:
     def release_run(self) -> None:
         self._lock.release()
 
-    def execute(self) -> dict[str, int]:
+    def execute(self, *, full_sync: bool = False) -> dict[str, int]:
+        self.full_sync_calls.append(full_sync)
         self.started.set()
         self.finish.wait(timeout=2)
         return {"converted": 1, "skipped": 0, "deleted": 0, "navigation": 0}
@@ -57,6 +59,20 @@ def test_sync_endpoint_returns_run_id_and_status(tmp_path: Path) -> None:
         assert status_response.json()["status"] == "succeeded"
         assert status_response.json()["summary"]["converted"] == 1
         assert client.get("/health").json() == {"status": "ok"}
+        assert service.full_sync_calls == [False]
+
+
+def test_full_sync_query_is_forwarded_and_validated(tmp_path: Path) -> None:
+    service = FakeService(tmp_path)
+    with TestClient(create_app(service)) as client:
+        assert client.post("/sync?full_sync=invalid").status_code == 422
+        assert not service.started.is_set()
+        response = client.post("/sync?full_sync=true")
+        assert response.status_code == 202
+        assert service.started.wait(timeout=1)
+        assert service.full_sync_calls == [True]
+        assert client.post("/sync?full_sync=true").status_code == 409
+        service.finish.set()
 
 
 def test_sync_status_returns_404_for_unknown_run(tmp_path: Path) -> None:
@@ -98,6 +114,7 @@ def test_cron_sync_starts_immediately_and_repeats_when_due(
             time.sleep(0.01)
         assert result["status"] == "succeeded"
         assert result["summary"]["converted"] == 1
+        assert service.full_sync_calls == [False, False]
     assert not service._lock.locked()
 
 
@@ -116,7 +133,7 @@ def test_failed_auto_run_is_persisted_and_next_tick_can_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FailingService(FakeService):
-        def execute(self) -> dict[str, int]:
+        def execute(self, *, full_sync: bool = False) -> dict[str, int]:
             raise RuntimeError("Conversion failed.")
 
     now = [0.0]

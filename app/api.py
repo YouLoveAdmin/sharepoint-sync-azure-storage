@@ -62,12 +62,12 @@ def create_app(service: SyncService | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    def execute_run(run_id: str) -> None:
+    def execute_run(run_id: str, full_sync: bool) -> None:
         store = runtime_service.store
         summary: dict[str, int] = {}
         try:
             store.update_run(run_id, "running", summary)
-            summary = runtime_service.execute()
+            summary = runtime_service.execute(full_sync=full_sync)
             store.update_run(run_id, "succeeded", summary)
         except Exception as exc:
             logger.exception("SharePoint sync run %s failed.", run_id)
@@ -87,13 +87,13 @@ def create_app(service: SyncService | None = None) -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    def submit_run() -> dict[str, str]:
+    def submit_run(*, full_sync: bool = False) -> dict[str, str]:
         if not runtime_service.acquire_run():
             raise HTTPException(status_code=409, detail="A synchronization run is already active.")
         run_id = str(uuid.uuid4())
         try:
             runtime_service.store.create_run(run_id)
-            executor.submit(execute_run, run_id)
+            executor.submit(execute_run, run_id, full_sync)
         except Exception:
             try:
                 runtime_service.store.update_run(
@@ -131,8 +131,8 @@ def create_app(service: SyncService | None = None) -> FastAPI:
             return result
 
     @application.post("/sync", status_code=status.HTTP_202_ACCEPTED)
-    def start_sync() -> dict[str, str]:
-        return submit_run()
+    def start_sync(full_sync: bool = False) -> dict[str, str]:
+        return submit_run(full_sync=full_sync)
 
     @application.post("/internal/sync-due", include_in_schema=False)
     def scheduled_sync(request: Request) -> dict[str, str]:

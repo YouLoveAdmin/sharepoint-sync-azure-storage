@@ -34,7 +34,9 @@ class SyncService:
     def release_run(self) -> None:
         self._run_lock.release()
 
-    def execute(self) -> dict[str, int]:
+    def execute(self, *, full_sync: bool = False) -> dict[str, int]:
+        if full_sync:
+            logger.info("Starting full sync: ignoring saved delta cursors and ETag skips.")
         summary = {
             "converted": 0, "skipped": 0, "deleted": 0,
             "navigation": 0, "unsupported": 0, "filtered": 0,
@@ -43,9 +45,9 @@ class SyncService:
             site = self.sharepoint.resolve_site(site_url)
             for library_name in self.settings.library_names:
                 drive = self.sharepoint.find_drive(site["id"], library_name)
-                self._sync_drive(site_url, drive, summary)
+                self._sync_drive(site_url, drive, summary, full_sync=full_sync)
         for page_url in dict.fromkeys(self.settings.page_urls):
-            self._sync_selected_page(page_url, summary)
+            self._sync_selected_page(page_url, summary, full_sync=full_sync)
         navigation_sites = tuple(dict.fromkeys((
             *(self.settings.site_urls if self.settings.include_navigation else ()),
             *self.settings.navigation_site_urls,
@@ -54,7 +56,9 @@ class SyncService:
             self._sync_navigation(navigation_sites, summary)
         return summary
 
-    def _sync_selected_page(self, page_url: str, summary: dict[str, int]) -> None:
+    def _sync_selected_page(
+        self, page_url: str, summary: dict[str, int], *, full_sync: bool = False,
+    ) -> None:
         site_url, relative_path = page_url_parts(page_url)
         site = self.sharepoint.resolve_site(site_url)
         drive = self.sharepoint.find_drive(site["id"], "Site Pages")
@@ -69,11 +73,14 @@ class SyncService:
         item = dict(item)
         parent_path = PurePosixPath(relative_path).parent.as_posix()
         item["parentReference"] = {"path": f"root:/{'' if parent_path == '.' else parent_path}"}
-        self._sync_item(site_url, drive, item, summary)
+        self._sync_item(site_url, drive, item, summary, full_sync=full_sync)
 
-    def _sync_drive(self, site_url: str, drive: dict, summary: dict[str, int]) -> None:
+    def _sync_drive(
+        self, site_url: str, drive: dict, summary: dict[str, int], *, full_sync: bool = False,
+    ) -> None:
         drive_id = drive["id"]
-        items, new_cursor = self.sharepoint.delta_items(drive_id, self.store.get_cursor(drive_id))
+        cursor = None if full_sync else self.store.get_cursor(drive_id)
+        items, new_cursor = self.sharepoint.delta_items(drive_id, cursor)
         for item in items:
             if item.get("deleted") is not None:
                 self._remove_deleted_item(drive_id, item, summary)
@@ -90,10 +97,13 @@ class SyncService:
                 continue
             if item.get("file") is None:
                 continue
-            self._sync_item(site_url, drive, item, summary)
+            self._sync_item(site_url, drive, item, summary, full_sync=full_sync)
         self.store.set_cursor(drive_id, new_cursor)
 
-    def _sync_item(self, site_url: str, drive: dict, item: dict, summary: dict[str, int]) -> None:
+    def _sync_item(
+        self, site_url: str, drive: dict, item: dict, summary: dict[str, int],
+        *, full_sync: bool = False,
+    ) -> None:
         item_id = str(item["id"])
         etag = str(item.get("eTag") or item.get("cTag") or item.get("lastModifiedDateTime") or "")
         source_path = self._source_path(item)
@@ -107,7 +117,7 @@ class SyncService:
         previous = self.store.get_item(drive["id"], item_id)
         relative_output = self._output_path(site_url, drive["name"], source_path)
         output_file = (self.store.output_dir / relative_output).resolve()
-        if etag and previous and previous["etag"] == etag and output_file.is_file():
+        if not full_sync and etag and previous and previous["etag"] == etag and output_file.is_file():
             summary["skipped"] += 1
             return
 
