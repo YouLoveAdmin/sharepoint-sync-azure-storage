@@ -1,12 +1,17 @@
 from dataclasses import replace
+from html import escape
+import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import httpx
+from bs4 import BeautifulSoup
 
 from app.config import Settings
 from app.conversion import MarkItDownClient, UnsupportedFileTypeError
 from app.storage import RunStore
+from app.sharepoint import SharePointClient
 from app.sync import SyncService
 
 
@@ -192,6 +197,90 @@ def test_site_page_uses_sharepoint_server_relative_path(tmp_path: Path) -> None:
     assert result["converted"] == 1
     assert sharepoint.page_paths == ["/sites/hr/SitePages/home.aspx"]
     assert converter.calls == 1
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_webpart_content_reaches_converter_and_persistent_output(
+    tmp_path: Path, selected: bool,
+) -> None:
+    data = {"properties": {"description": "Saved web-part knowledge"}}
+    canvas = f'<div data-sp-webpartdata="{escape(json.dumps(data), quote=True)}"></div>'
+    client = SharePointClient(
+        Mock(),
+        http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"Title": "Home", "CanvasContent1": canvas})
+        )),
+    )
+
+    class PageSharePoint(FakeSharePoint):
+        def get_page_html(self, site_url: str, server_relative_path: str) -> tuple[str, str]:
+            return client.get_page_html(site_url, server_relative_path)
+
+    class PageConverter(FakeConverter):
+        def convert(self, filename: str, content: bytes) -> str:
+            assert filename == "Home.html"
+            html = content.decode("utf-8")
+            assert "data-sp-webpartdata" not in html
+            return BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
+
+    sharepoint = PageSharePoint()
+    sharepoint.changes = [{
+        "id": "page", "name": "Home.aspx", "eTag": "v1", "file": {},
+        "parentReference": {"path": "/drives/drive-id/root:/"},
+    }]
+    service = make_service(tmp_path, sharepoint, PageConverter(), ("Site Pages",))
+    if selected:
+        service.settings = replace(
+            service.settings, site_urls=(),
+            page_urls=("https://contoso.sharepoint.com/sites/hr/SitePages/Home.aspx",),
+        )
+    try:
+        assert service.execute()["converted"] == 1
+        assert service.execute()["skipped"] == 1
+    finally:
+        client.close()
+
+    output = next(tmp_path.rglob("Home.aspx.md"))
+    assert "Saved web-part knowledge" in output.read_text(encoding="utf-8")
+
+
+def test_invalid_webpart_preserves_previous_output_and_delta_cursor(tmp_path: Path) -> None:
+    client = SharePointClient(
+        Mock(),
+        http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={
+                "CanvasContent1": '<div data-sp-webpartdata="{broken"></div>',
+            })
+        )),
+    )
+
+    class BrokenPageSharePoint(FakeSharePoint):
+        def get_page_html(self, site_url: str, server_relative_path: str) -> tuple[str, str]:
+            return client.get_page_html(site_url, server_relative_path)
+
+    sharepoint = BrokenPageSharePoint()
+    converter = FakeConverter()
+    service = make_service(tmp_path, sharepoint, converter, ("Site Pages",))
+    output = service._output_path(
+        "https://contoso.sharepoint.com/sites/hr", "Site Pages", "Home.aspx",
+    )
+    service.store.write_markdown(output, "previous complete export")
+    service.store.upsert_item("drive-id", "page", "Home.aspx", output, "v1")
+    service.store.set_cursor("drive-id", "previous-cursor")
+    sharepoint.changes = [{
+        "id": "page", "name": "Home.aspx", "eTag": "v2", "file": {},
+        "parentReference": {"path": "/drives/drive-id/root:/"},
+    }]
+    try:
+        with pytest.raises(ValueError, match="web-part"):
+            service.execute()
+    finally:
+        client.close()
+
+    assert (tmp_path / output).read_text(encoding="utf-8") == "previous complete export"
+    assert service.store.get_item("drive-id", "page")["etag"] == "v1"
+    assert service.store.get_cursor("drive-id") == "previous-cursor"
+    assert converter.calls == 0
 
 
 @pytest.mark.parametrize("unsupported", [True, False])

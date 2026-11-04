@@ -7,7 +7,7 @@ This project exports configured SharePoint document libraries, modern Site Pages
 - Reads configured libraries from configured SharePoint sites with Microsoft Graph drive delta queries.
 - Converts changed files using `POST /convert` with a multipart `file` field. The converter returns JSON containing a `download_url`; the URL must use the same host as the configured converter endpoint.
 - Skips files explicitly rejected by the converter as unsupported, logs a warning, and reports them separately as `unsupported` in the run summary. Other conversion errors fail the run.
-- Extracts the `CanvasContent1` HTML for `.aspx` pages in the configured Site Pages library and sends the HTML to the converter.
+- Extracts the `CanvasContent1` HTML for `.aspx` pages, expands saved web-part content, and sends the resulting HTML to the converter.
 - Reads additional navigation-only sites and individually selected pages without exporting other content from those sites.
 - Exports the site's visible SharePoint navigation location to Markdown (`Auto` detects the modern communication-site top navigation or the team-site Quick Launch).
 - Skips unchanged files, atomically replaces changed outputs, and removes outputs when Graph reports a source deletion.
@@ -58,6 +58,30 @@ performed; it does not automatically backfill unchanged files. The `filtered`
 count covers items encountered in the current run, not all excluded source files.
 
 Selected pages are checked individually for metadata/ETag changes without enumerating their library items or advancing its delta cursor. A confirmed page `404` removes its tracked Markdown; permission and network failures fail the run without deleting that output.
+
+### Page web parts
+
+Both library pages and individually selected pages use the same export path.
+The exporter preserves canvas order and rich-text markup, expands the JSON in
+`data-sp-webpartdata`, and extracts `serverProcessedContent` HTML, searchable text,
+links, and image references. It accepts both SharePoint dictionary fields and
+Graph-style key/value arrays. A best-effort fallback extracts common text, link,
+and image fields from nested web-part properties. Serialized HTML-property copies
+are removed to avoid duplicate content. Relative links are resolved against the
+source page URL; plain text and page titles are HTML-escaped.
+
+This exports **saved content**, not a browser-rendered snapshot. Dynamic lists,
+news, embedded documents, and custom web parts may obtain their displayed content
+from other APIs, which this exporter does not query. Every page containing web
+parts logs a review-required warning; parts with no extractable content receive
+a visible notice in the export. Linked files and images remain references, not
+downloaded attachments. Malformed web-part JSON fails the export rather than
+silently omitting the part, preserving any previously published Markdown.
+No additional API permissions are needed beyond the existing page REST access.
+
+Existing delta cursors and ETag skipping are unchanged. After upgrading, old page
+exports are refreshed when their source changes or a full scan is performed;
+deploying this change alone does not backfill unchanged pages.
 
 The consolidated navigation file is atomically replaced after every configured navigation source has been read successfully, so removed menu links disappear and a failed read preserves the previous file. Old per-site `navigation-*.md` exports for those sites are removed after successful consolidation. When no navigation sources are selected, navigation output is left untouched.
 

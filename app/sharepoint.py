@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from urllib.parse import ParseResult, quote, unquote, urlparse
+from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse
 
 import httpx
 from azure.core.credentials import TokenCredential
+
+from app.page_content import render_page
 
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 
@@ -157,7 +159,10 @@ class SharePointClient:
         title = str(fields.get("Title") or server_relative_path.rsplit("/", 1)[-1])
         canvas = str(fields.get("CanvasContent1") or "")
         modified = str(fields.get("Modified") or "")
-        return f"<html><head><title>{title}</title></head><body>{canvas}</body></html>", modified
+        page_url = urljoin(
+            f"{parsed.scheme}://{parsed.netloc}/", quote(server_relative_path, safe="/")
+        )
+        return render_page(title, canvas, page_url), modified
 
     def navigation_nodes(self, site_url: str, location: str) -> list[dict]:
         parsed = urlparse(site_url)
