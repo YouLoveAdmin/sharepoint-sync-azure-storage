@@ -29,6 +29,10 @@ param jobIdentityClientId string = ''
 @description('Keep the job Manual until migration and testing complete.')
 param jobScheduled bool = false
 
+@description('Optional converter sidecar image. Empty keeps the external converter endpoint.')
+param jobConverterImage string = ''
+var bundledConverter = !empty(jobConverterImage)
+
 @description('Optional unique revision suffix to refresh mutable image tags.')
 param revisionSuffix string = ''
 
@@ -277,7 +281,7 @@ resource syncJob 'Microsoft.App/jobs@2024-03-01' = if (deploymentTarget == 'Job'
       } : null
     }
     template: {
-      containers: [
+      containers: concat([
         {
           name: 'sharepoint-sync'
           image: image
@@ -289,19 +293,39 @@ resource syncJob 'Microsoft.App/jobs@2024-03-01' = if (deploymentTarget == 'Job'
           }
           env: concat(runtimeEnv, [
             { name: 'AZURE_CLIENT_ID', value: jobIdentityClientId }
-          ])
-          volumeMounts: [
+          ], bundledConverter ? [
+            { name: 'SYNC_CONTROL_DIR', value: '/sync-control' }
+          ] : [])
+          volumeMounts: concat([
             { volumeName: outputVolumeName, mountPath: outputMountPath }
+          ], bundledConverter ? [
+            { volumeName: 'sync-control', mountPath: '/sync-control' }
+          ] : [])
+        }
+      ], bundledConverter ? [
+        {
+          name: 'markitdown'
+          image: jobConverterImage
+          command: ['python', '-c', loadTextContent('../app/converter_sidecar.py')]
+          resources: { cpu: json('1.0'), memory: '2Gi' }
+          env: [
+            { name: 'SYNC_CONTROL_DIR', value: '/sync-control' }
+            { name: 'UPLOAD_FOLDER', value: '/tmp/uploads' }
+          ]
+          volumeMounts: [
+            { volumeName: 'sync-control', mountPath: '/sync-control' }
           ]
         }
-      ]
-      volumes: [
+      ] : [])
+      volumes: concat([
         {
           name: outputVolumeName
           storageType: 'AzureFile'
           storageName: environmentStorage.name
         }
-      ]
+      ], bundledConverter ? [
+        { name: 'sync-control', storageType: 'EmptyDir' }
+      ] : [])
     }
   }
 }

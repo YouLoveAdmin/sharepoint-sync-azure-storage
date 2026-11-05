@@ -4,7 +4,11 @@ import argparse
 import json
 import logging
 import os
+import time
 import uuid
+from pathlib import Path
+
+import httpx
 
 from azure.identity import ManagedIdentityCredential
 
@@ -15,6 +19,23 @@ from app.storage import RunStore
 from app.sync import SyncService
 
 logger = logging.getLogger(__name__)
+
+
+def wait_for_converter(url: str, control: Path, timeout: float = 180) -> None:
+    deadline = time.monotonic() + timeout
+    with httpx.Client(timeout=5) as client:
+        while True:
+            if (control / "converter-failed").exists():
+                raise RuntimeError("Converter container exited before sync.")
+            try:
+                response = client.get(f"{url.rstrip('/')}/healthz")
+                if response.status_code == 200 and response.json().get("status") == "ok":
+                    return
+            except (httpx.RequestError, ValueError):
+                logger.info("Waiting for the local converter to become ready.")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Local converter did not become ready within the startup timeout.")
+            time.sleep(2)
 
 
 def run_once(service: SyncService, *, full_sync: bool = False) -> int:
@@ -46,6 +67,8 @@ def main() -> int:
         os.setuid(user.pw_uid)
     try:
         settings = Settings.from_env()
+        if os.getenv("SYNC_CONTROL_DIR"):
+            wait_for_converter(settings.converter_url, Path(os.environ["SYNC_CONTROL_DIR"]))
         credential = ManagedIdentityCredential(client_id=settings.managed_identity_client_id)
         try:
             store = RunStore(settings.output_dir, exclusive_writer=True)
@@ -70,5 +93,18 @@ def main() -> int:
         return 1
 
 
+def entrypoint() -> int:
+    code = 1
+    try:
+        code = main()
+        return code
+    finally:
+        if os.getenv("SYNC_CONTROL_DIR"):
+            control = Path(os.environ["SYNC_CONTROL_DIR"])
+            temporary = control / "worker-done.tmp"
+            temporary.write_text(json.dumps({"exit_code": code}))
+            temporary.replace(control / "worker-done.json")
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(entrypoint())

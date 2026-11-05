@@ -313,6 +313,21 @@ sync, a persisted run result, and exit code 0 on success or nonzero on failure.
 No HTTP server or in-container cron is started. `AUTO_SYNC` and `SYNC_INTERVAL`
 do not schedule the job; Azure evaluates `AZURE_JOB_CRON` in UTC.
 
+Set `AZURE_JOB_CONVERTER_IMAGE` or pass `-ConverterImage` to bundle MarkItDown
+as a second container in each job execution. Pin a published commit tag or digest.
+In this mode the helper overrides `MARKITDOWN_API_URL` to **http://localhost:5001**;
+do not use HTTPS, since the local converter has no TLS listener. The external
+endpoint mode still rejects localhost and internal target ports on Azure ingress.
+
+The worker waits up to 180 seconds for `/healthz`, then performs the sync. Both
+containers share only an execution-local EmptyDir for lifecycle signals. Only the
+worker mounts persistent output/state; converter uploads stay in its temporary
+filesystem. The converter launcher runs one Gunicorn worker with a 300-second
+request timeout, then gracefully stops the server when the worker exits, whether
+successful or failed. The overall job timeout bounds hard crashes that cannot
+signal completion. A converter crash fails the execution; scheduling is enabled
+only after a successful test. Bundled execution requests 1 CPU/2 GiB per container.
+
 The default `0 */12 * * *` runs at 00:00 and 12:00 UTC. The job uses one replica
 per execution, one completion, no automatic replica retries, and a default
 3600-second execution timeout (`-TimeoutSeconds` overrides it). Parallelism 1
