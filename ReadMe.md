@@ -369,7 +369,10 @@ inspect execution/log status before retrying or rolling back. Do not run the
 old app deployment helper after migration: doing so can restart a competing writer.
 
 Use `az containerapp job start` for on-demand incremental runs, or override its
-arguments with `--args=--full-sync` for a full refresh. Use
+arguments with `--container-name sharepoint-sync --args=--full-sync` for a full
+refresh. Explicitly target the sync worker when the job has a converter container,
+and verify the execution template contains the override; execution success alone
+does not prove that unchanged pages were refreshed. Use
 `az containerapp job execution list` for execution status; the mounted state keeps
 run history. The stopped API has no available `/sync` or `/health` endpoint.
 For rollback, first change the job to Manual and wait for all executions to
