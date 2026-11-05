@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.writer_lock import WriterLock
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,9 +22,22 @@ def utc_now() -> str:
 
 
 class RunStore:
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: Path, *, exclusive_writer: bool = False) -> None:
         self.output_dir = output_dir.expanduser().resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._writer = WriterLock(self.output_dir) if exclusive_writer else None
+        try:
+            self._initialize()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+
+    def _initialize(self) -> None:
         self.state_path = self.output_dir / ".sync-state.json"
         self._lock = threading.RLock()
         if not self.state_path.exists():

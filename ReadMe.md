@@ -116,11 +116,11 @@ The consolidated navigation file is atomically replaced after every configured n
 
 `OUTPUT_DIR` is required and controls both the Markdown destination and the plain-text JSON state file `.sync-state.json`. In Azure, it **must point to your writable persistent storage mount**, for example `/mnt/sharepoint`. The sample `./output` value is only for local development; a directory inside the container filesystem does not survive replacement or reboot.
 
-Delta cursors, ETags, item/output mappings, and run history are all stored at this destination. State updates are serialized within the process and written as UTF-8 JSON using a temporary file, flush/fsync, and replacement on the same mount. There are no SQLite databases, database journals, or persistent lock files used by the application. Temporary publication files also stay on that mount. There is no container-local state fallback: inaccessible or unwritable storage causes an error.
+Delta cursors, ETags, item/output mappings, and run history are all stored at this destination. State updates are serialized within the process and written as UTF-8 JSON using a temporary file, flush/fsync, and replacement on the same mount. There are no SQLite databases or database journals. Production API/job writers hold an OS-level lock on `.sync-writer.lock` before opening state; exclude this file from ingestion and do not delete it. Temporary publication files also stay on that mount. There is no container-local state fallback: inaccessible or unwritable storage causes an error.
 
 Mount the same persistent destination at the configured path after every reboot or redeployment. Preserve `.sync-state.json` along with the Markdown and exclude state and temporary files from downstream Markdown ingestion. The application cannot determine whether an arbitrary writable path is truly persistent; configuring the mount correctly is a deployment responsibility. The mount must support same-directory file replacement. Malformed or unsupported JSON state raises an error instead of silently resetting checkpoints; restore a known-good backup to recover.
 
-Use only one process/replica writing to a destination, including during revision changes; the thread lock does not coordinate different containers. A process killed during a write can leave an unused `.sync-*.tmp` file, but restart reads only `.sync-state.json`, never that temporary file.
+Use only one process/replica writing to a destination, including during revision changes. A competing writer fails before recovering interrupted runs or modifying state. The mount must support OS advisory locking; Azure Files SMB locking must remain enabled. OS locks are released when the process exits, including crashes; the lock file intentionally remains. A process killed during a write can leave an unused `.sync-*.tmp` file, but restart reads only `.sync-state.json`, never that temporary file.
 
 Existing `.sync-state.sqlite3` files are not opened, migrated, or deleted. If one exists without JSON state, startup emits a warning and starts fresh JSON state: previous run history is unavailable and the next sync re-exports current items. Old outputs for sources deleted before that initial scan cannot be reconciled from the legacy database automatically.
 
@@ -226,7 +226,8 @@ The image disables forwarded-header trust so ingress callers cannot impersonate
 a loopback scheduler request. Do not override that server option or expose the
 scheduler endpoint through a local forwarding proxy.
 
-Keep one replica and one API worker. The lock is process-local: **automatic sync
+Keep one replica and one API worker. The persistent writer lock prevents competing
+production writers, but **automatic sync
 must not run in two revisions sharing an output destination**. Before rolling an
 update, disable automatic scheduling on the old revision, wait for its current
 run to finish, and ensure the old revision is stopped before enabling the new
@@ -300,6 +301,65 @@ The permission helper uses core `az resource show` to discover the app identity 
 If permission setup fails during Azure discovery, its error identifies `account show` or `resource show` and provides a sanitized diagnosis. Azure CLI login is local to each computer/user; signing into Graph or deploying from another machine does not sign in Azure CLI on the machine running this helper. Run `az login`, select the intended subscription with `az account set --subscription '<subscription-id-or-name>'`, and check the deployment settings on that computer. Azure RBAC read access to the app is required in addition to Graph administrator privileges.
 
 ## Azure deployment
+
+### Scheduled Container Apps Job
+
+For periodic batch sync without an always-running API, use the local
+[Deploy-SharePointSyncJob.ps1](script/Deploy-SharePointSyncJob.ps1) helper.
+It reuses the same [main.bicep](infra/main.bicep) environment/storage provisioning,
+source scopes, converter endpoint, allowlist, output mount, and image as the app.
+It overrides the image command with `python -m app.job`: one synchronous incremental
+sync, a persisted run result, and exit code 0 on success or nonzero on failure.
+No HTTP server or in-container cron is started. `AUTO_SYNC` and `SYNC_INTERVAL`
+do not schedule the job; Azure evaluates `AZURE_JOB_CRON` in UTC.
+
+The default `0 */12 * * *` runs at 00:00 and 12:00 UTC. The job uses one replica
+per execution, one completion, no automatic replica retries, and a default
+3600-second execution timeout (`-TimeoutSeconds` overrides it). Parallelism 1
+does not prevent two separate executions from overlapping; the persistent
+writer lock makes a competing execution fail safely. A killed/timed-out run is
+marked failed when the next writer opens state and is retried from saved delta
+checkpoints, not automatically resumed.
+
+Jobs require a **user-assigned** identity in `AZURE_JOB_IDENTITY_RESOURCE_ID`.
+The old app's system-assigned identity cannot be attached to a job. Reuse an
+already authorized user-assigned identity, or create one with the local
+[Initialize-SyncJobIdentity.ps1](script/Initialize-SyncJobIdentity.ps1) helper.
+`-GrantPermissions` invokes the existing administrator permission workflow,
+granting Graph/SharePoint `Sites.Selected` and configured site-level read.
+It requires authorized administrator sign-in and does not copy the old app's
+permissions automatically. No identity values are written to private configuration.
+
+```powershell
+# Preview only.
+.\script\Deploy-SharePointSyncJob.ps1 -WhatIf
+
+# Optional new identity plus administrator permission setup; returns its resource ID.
+$identityId = .\script\Initialize-SyncJobIdentity.ps1 -GrantPermissions
+
+# Migrate the old app, preserving its output/state destination.
+.\script\Deploy-SharePointSyncJob.ps1 -IdentityResourceId $identityId `
+  -MigrateFromApp -Schedule '0 */12 * * *' `
+  -Image 'ghcr.io/youloveadmin/sharepoint-sync-azure-storage:sha-<commit>'
+
+# Update a job while the old app remains stopped. Optional full refresh test.
+.\script\Deploy-SharePointSyncJob.ps1 -Mode Update -FullSyncTest
+```
+
+The migration helper refuses active job executions, checks that the old API
+has no active sync, deploys the job as **Manual**, stops (does not delete) the old
+app, and verifies a real execution. Only then does it enable **Schedule**.
+On test failure, scheduling stays disabled and the old app stays stopped;
+inspect execution/log status before retrying or rolling back. Do not run the
+old app deployment helper after migration: doing so can restart a competing writer.
+
+Use `az containerapp job start` for on-demand incremental runs, or override its
+arguments with `--args=--full-sync` for a full refresh. Use
+`az containerapp job execution list` for execution status; the mounted state keeps
+run history. The stopped API has no available `/sync` or `/health` endpoint.
+For rollback, first change the job to Manual and wait for all executions to
+finish, then use the Azure Container Apps Start operation on the retained app.
+Never delete the state or lock file to switch execution modes.
 
 `infra/main.bicep` provisions a system-assigned identity, internal-only Container Apps ingress, one Container App replica, a Container Apps managed environment, and an Azure Files mount. It can reuse an existing SMB account/share in the same subscription, including another resource group, or create dedicated storage when no existing account is specified. The managed identity does not receive SharePoint permissions automatically; follow the administrator steps above after deployment.
 
@@ -525,7 +585,7 @@ az containerapp update `
 
 Use the immutable tag rather than relying on a running app to detect changes to `latest`. After checking the new revision, you can use `:latest` for a fresh deployment or update by explicitly supplying the newly published image reference.
 
-The sync endpoint is private to the Container Apps environment. Callers must have network access to that environment; the API does not perform end-user authentication. Keep the app at one replica because the current asynchronous run queue and lock are process-local. Run records and delta state survive restarts on Azure Files; a run interrupted by a restart is marked failed and can be started again.
+The sync endpoint is private to the Container Apps environment. Callers must have network access to that environment; the API does not perform end-user authentication. Keep the app at one replica because the asynchronous run queue is process-local. A persistent writer lock also excludes competing production API/job writers. Run records and delta state survive restarts on Azure Files; a run interrupted by a restart is marked failed and can be started again.
 
 ## API
 

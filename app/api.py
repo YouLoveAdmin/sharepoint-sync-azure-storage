@@ -28,7 +28,7 @@ def _create_service() -> SyncService:
         ManagedIdentityCredential(client_id=settings.managed_identity_client_id),
         AzureCliCredential(),
     )
-    store = RunStore(settings.output_dir)
+    store = RunStore(settings.output_dir, exclusive_writer=True)
     sharepoint = SharePointClient(credential, settings.max_upload_bytes)
     converter = MarkItDownClient(settings.converter_url, settings.max_upload_bytes)
     return SyncService(settings, store, sharepoint, converter)
@@ -55,6 +55,7 @@ def create_app(service: SyncService | None = None) -> FastAPI:
             await asyncio.to_thread(executor.shutdown, wait=True)
             runtime_service.sharepoint.close()
             runtime_service.converter.close()
+            runtime_service.store.close()
 
     application = FastAPI(
         title="SharePoint Markdown Sync",

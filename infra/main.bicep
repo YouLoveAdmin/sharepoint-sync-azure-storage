@@ -12,6 +12,23 @@ param appName string = 'sharepoint-sync'
 @description('Container image reference accessible to Azure Container Apps.')
 param image string
 
+@allowed(['App', 'Job'])
+param deploymentTarget string = 'App'
+param jobName string = '${appName}-job'
+
+@description('Five-field UTC cron schedule. Used only for jobs.')
+param jobSchedule string = '0 */12 * * *'
+
+@minValue(1)
+param jobTimeout int = 3600
+
+@description('Existing user-assigned identity resource ID with SharePoint/Graph access.')
+param jobIdentityResourceId string = ''
+param jobIdentityClientId string = ''
+
+@description('Keep the job Manual until migration and testing complete.')
+param jobScheduled bool = false
+
 @description('Optional unique revision suffix to refresh mutable image tags.')
 param revisionSuffix string = ''
 
@@ -79,6 +96,19 @@ var environmentStorageName = useExistingStorage
   ? '${take(outputVolumeName, 45)}-${uniqueString(storageAccountName, outputShareName)}'
   : outputVolumeName
 
+var runtimeEnv = [
+  { name: 'SHAREPOINT_SITE_URLS', value: sharePointSiteUrls }
+  { name: 'SHAREPOINT_SITE_URLS_NAVIGATION', value: sharePointSiteUrlsNavigation }
+  { name: 'SHAREPOINT_SITE_PAGES', value: sharePointSitePages }
+  { name: 'SHAREPOINT_LIBRARY_NAMES', value: sharePointLibraryNames }
+  { name: 'SHAREPOINT_INCLUDE_NAVIGATION', value: string(includeNavigation) }
+  { name: 'SHAREPOINT_NAVIGATION_LOCATIONS', value: navigationLocations }
+  { name: 'MARKITDOWN_API_URL', value: markItDownApiUrl }
+  { name: 'OUTPUT_DIR', value: outputPath }
+  { name: 'MAX_UPLOAD_BYTES', value: string(maxUploadBytes) }
+  { name: 'SUPPORTED_SOURCE_FILE_TYPES', value: supportedSourceFileTypes }
+]
+
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!useExistingStorage) {
   name: storageAccountName
   location: location
@@ -139,7 +169,7 @@ resource environmentStorage 'Microsoft.App/managedEnvironments/storages@2024-03-
   }
 }
 
-resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
+resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deploymentTarget == 'App') {
   name: appName
   location: location
   identity: {
@@ -170,47 +200,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json('1.0')
             memory: '2Gi'
           }
-          env: [
-            {
-              name: 'SHAREPOINT_SITE_URLS'
-              value: sharePointSiteUrls
-            }
-            {
-              name: 'SHAREPOINT_SITE_URLS_NAVIGATION'
-              value: sharePointSiteUrlsNavigation
-            }
-            {
-              name: 'SHAREPOINT_SITE_PAGES'
-              value: sharePointSitePages
-            }
-            {
-              name: 'SHAREPOINT_LIBRARY_NAMES'
-              value: sharePointLibraryNames
-            }
-            {
-              name: 'SHAREPOINT_INCLUDE_NAVIGATION'
-              value: string(includeNavigation)
-            }
-            {
-              name: 'SHAREPOINT_NAVIGATION_LOCATIONS'
-              value: navigationLocations
-            }
-            {
-              name: 'MARKITDOWN_API_URL'
-              value: markItDownApiUrl
-            }
-            {
-              name: 'OUTPUT_DIR'
-              value: outputPath
-            }
-            {
-              name: 'MAX_UPLOAD_BYTES'
-              value: string(maxUploadBytes)
-            }
-            {
-              name: 'SUPPORTED_SOURCE_FILE_TYPES'
-              value: supportedSourceFileTypes
-            }
+          env: concat(runtimeEnv, [
             {
               name: 'AUTO_SYNC'
               value: string(autoSync)
@@ -219,7 +209,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'SYNC_INTERVAL'
               value: string(syncInterval)
             }
-          ]
+          ])
           volumeMounts: [
             {
               volumeName: outputVolumeName
@@ -261,7 +251,62 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
-output appId string = containerApp.id
-output managedIdentityPrincipalId string = containerApp.identity.principalId
-output internalFqdn string = containerApp.properties.configuration.ingress.fqdn
+resource syncJob 'Microsoft.App/jobs@2024-03-01' = if (deploymentTarget == 'Job') {
+  name: jobName
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${jobIdentityResourceId}': {}
+    }
+  }
+  properties: {
+    environmentId: managedEnvironment.id
+    configuration: {
+      triggerType: jobScheduled ? 'Schedule' : 'Manual'
+      replicaTimeout: jobTimeout
+      replicaRetryLimit: 0
+      manualTriggerConfig: jobScheduled ? null : {
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      scheduleTriggerConfig: jobScheduled ? {
+        cronExpression: jobSchedule
+        parallelism: 1
+        replicaCompletionCount: 1
+      } : null
+    }
+    template: {
+      containers: [
+        {
+          name: 'sharepoint-sync'
+          image: image
+          command: ['python', '-m', 'app.job']
+          args: []
+          resources: {
+            cpu: json('1.0')
+            memory: '2Gi'
+          }
+          env: concat(runtimeEnv, [
+            { name: 'AZURE_CLIENT_ID', value: jobIdentityClientId }
+          ])
+          volumeMounts: [
+            { volumeName: outputVolumeName, mountPath: outputMountPath }
+          ]
+        }
+      ]
+      volumes: [
+        {
+          name: outputVolumeName
+          storageType: 'AzureFile'
+          storageName: environmentStorage.name
+        }
+      ]
+    }
+  }
+}
+
+output appId string = deploymentTarget == 'App' ? containerApp!.id : syncJob!.id
+output managedIdentityPrincipalId string = deploymentTarget == 'App' ? containerApp!.identity.principalId : ''
+output internalFqdn string = deploymentTarget == 'App' ? containerApp!.properties.configuration.ingress.fqdn : ''
 output outputStorageAccountName string = storageAccountName
